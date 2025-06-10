@@ -67,6 +67,7 @@ class EvolvableMLP(EvolvableModule):
         noisy: bool = False,
         noise_std: float = 0.5,
         new_gelu: bool = False,
+        batch_norm: bool = False,
         device: str = "cpu",
         name: str = "mlp",
     ):
@@ -107,6 +108,7 @@ class EvolvableMLP(EvolvableModule):
         self.hidden_size = hidden_size
         self.noisy = noisy
         self.noise_std = noise_std
+        self.batch_norm = batch_norm
 
         self.model = create_mlp(
             input_size=self.num_inputs,
@@ -117,6 +119,7 @@ class EvolvableMLP(EvolvableModule):
             noisy=self.noisy,
             init_layers=self.init_layers,
             layer_norm=self.layer_norm,
+            batch_norm=self.batch_norm,
             output_layernorm=self.output_layernorm,
             activation=self.activation,
             noise_std=self.noise_std,
@@ -129,6 +132,7 @@ class EvolvableMLP(EvolvableModule):
     def net_config(self) -> Dict[str, Any]:
         """Returns model configuration in dictionary."""
         net_config = self.init_dict.copy()
+        net_config["batch_norm"] = self.batch_norm
         for attr in ["num_inputs", "num_outputs", "device", "name"]:
             if attr in net_config:
                 net_config.pop(attr)
@@ -275,6 +279,7 @@ class EvolvableMLP(EvolvableModule):
             noisy=self.noisy,
             init_layers=self.init_layers,
             layer_norm=self.layer_norm,
+            batch_norm=self.batch_norm,
             output_layernorm=self.output_layernorm,
             activation=self.activation,
             noise_std=self.noise_std,

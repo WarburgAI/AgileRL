@@ -50,6 +50,7 @@ class EvolvableLSTM(EvolvableModule):
         min_layers: int = 1,
         max_layers: int = 3,
         dropout: float = 0.0,
+        batch_norm: bool = False,
         device: str = "cpu",
         name: str = "lstm",
     ):
@@ -84,6 +85,7 @@ class EvolvableLSTM(EvolvableModule):
         self.min_layers = min_layers
         self.max_layers = max_layers
         self.dropout = dropout
+        self.batch_norm = batch_norm
 
         # Create the network
         self.model = self.create_lstm()
@@ -96,6 +98,8 @@ class EvolvableLSTM(EvolvableModule):
         """
         # Define network components
         model_dict = nn.ModuleDict()
+        if self.batch_norm:
+            model_dict[f"{self.name}_bn_input"] = nn.BatchNorm1d(self.input_size, device=self.device)
         model_dict[f"{self.name}_lstm"] = nn.LSTM(
             input_size=self.input_size,
             hidden_size=int(self.hidden_size),
@@ -106,6 +110,8 @@ class EvolvableLSTM(EvolvableModule):
         )
 
         # Add activation if specified
+        if self.batch_norm:
+            model_dict[f"{self.name}_bn_output"] = nn.BatchNorm1d(self.hidden_size, device=self.device)
         model_dict[f"{self.name}_lstm_output"] = nn.Linear(
             self.hidden_size, self.num_outputs, device=self.device
         )
@@ -119,6 +125,7 @@ class EvolvableLSTM(EvolvableModule):
     def net_config(self) -> Dict[str, Any]:
         """Returns model configuration in dictionary format."""
         net_config = self.init_dict.copy()
+        net_config["batch_norm"] = self.batch_norm
         for attr in ["input_size", "num_outputs", "device", "name"]:
             if attr in net_config:
                 net_config.pop(attr)
@@ -167,10 +174,24 @@ class EvolvableLSTM(EvolvableModule):
         if len(x.shape) == 2:
             x = x.unsqueeze(0)
 
+        if self.batch_norm:
+            # Permute for BatchNorm1d: (batch, seq_len, input_size) -> (batch, input_size, seq_len)
+            x = x.permute(0, 2, 1)
+            x = self.model[f"{self.name}_bn_input"](x)
+            # Permute back: (batch, input_size, seq_len) -> (batch, seq_len, input_size)
+            x = x.permute(0, 2, 1)
+
         lstm_output, lstm_states = self.model[f"{self.name}_lstm"](x)
-        lstm_output = self.model[f"{self.name}_lstm_output"](lstm_output[:, -1, :])
-        lstm_output = self.model[f"{self.name}_output_activation"](lstm_output)
-        return lstm_output
+
+        # Select the output of the last time step
+        lstm_output_last_step = lstm_output[:, -1, :]
+
+        if self.batch_norm:
+            lstm_output_last_step = self.model[f"{self.name}_bn_output"](lstm_output_last_step)
+
+        output = self.model[f"{self.name}_lstm_output"](lstm_output_last_step)
+        output = self.model[f"{self.name}_output_activation"](output)
+        return output
 
     def get_output_dense(self) -> torch.nn.Module:
         """Returns output layer of neural network."""

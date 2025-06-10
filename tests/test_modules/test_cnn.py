@@ -581,3 +581,184 @@ def test_clone_instance(
     assert str(clone.state_dict()) == str(evolvable_cnn.state_dict())
     for key, param in clone_net.named_parameters():
         torch.testing.assert_close(param, original_feature_net_dict[key])
+
+
+# ---- Batch Norm Tests ----
+def count_modules_by_type(model_sequential, module_type):
+    """Counts the number of modules of a specific type in a sequential model."""
+    count = 0
+    # The model is a Sequential, and its children are the actual layers (Conv2d, BatchNorm2d, ReLU, etc.)
+    for module in model_sequential.children():
+        if isinstance(module, module_type):
+            count = count + 1
+    return count
+
+def test_cnn_batch_norm_true(device):
+    input_shape, num_outputs = [3, 32, 32], 5
+    channel_size, kernel_size, stride_size = [16, 32], [3, 3], [1, 1]
+
+    evolvable_cnn = EvolvableCNN(
+        input_shape=input_shape,
+        num_outputs=num_outputs,
+        channel_size=channel_size,
+        kernel_size=kernel_size,
+        stride_size=stride_size,
+        batch_norm=True,
+        layer_norm=False, # Test only batch_norm here
+        block_type="Conv2d",
+        device=device,
+    )
+
+    assert count_modules_by_type(evolvable_cnn.model, torch.nn.BatchNorm2d) == len(channel_size), \
+        "Incorrect number of BatchNorm2d layers"
+
+    # Check order: Conv2d -> BatchNorm2d -> Activation
+    model_layers = list(evolvable_cnn.model.children())
+    conv_indices = [i for i, layer in enumerate(model_layers) if isinstance(layer, torch.nn.Conv2d)]
+
+    for conv_idx in conv_indices:
+        assert conv_idx + 2 < len(model_layers), \
+            f"Conv2d layer at index {conv_idx} should be followed by BatchNorm2d and Activation."
+        assert isinstance(model_layers[conv_idx + 1], torch.nn.BatchNorm2d), \
+            f"Conv2d layer at index {conv_idx} should be followed by BatchNorm2d, found {type(model_layers[conv_idx + 1])}."
+        # Assuming default activation is ReLU. This needs to be flexible if default changes.
+        assert isinstance(model_layers[conv_idx + 2], (torch.nn.ReLU, torch.nn.ELU, torch.nn.Tanh, torch.nn.Sigmoid)), \
+            f"BatchNorm2d at index {conv_idx+1} should be followed by an Activation, found {type(model_layers[conv_idx + 2])}."
+
+    # Forward pass
+    input_tensor = torch.randn(16, *input_shape).to(device) # Batch size > 1 for BN
+    with torch.no_grad():
+        output_tensor = evolvable_cnn.forward(input_tensor)
+    assert output_tensor.shape == (16, num_outputs)
+    assert evolvable_cnn.batch_norm
+
+def test_cnn_batch_norm_false(device):
+    input_shape, num_outputs = [3, 32, 32], 5
+    channel_size, kernel_size, stride_size = [16, 32], [3, 3], [1, 1]
+
+    evolvable_cnn = EvolvableCNN(
+        input_shape=input_shape,
+        num_outputs=num_outputs,
+        channel_size=channel_size,
+        kernel_size=kernel_size,
+        stride_size=stride_size,
+        batch_norm=False,
+        block_type="Conv2d",
+        device=device,
+    )
+    # Count only pre-activation batch norms. Layer norm (if active) is also BatchNorm2d but named differently.
+    pre_activation_bn_count = 0
+    for name, module in evolvable_cnn.model.named_children():
+        if isinstance(module, torch.nn.BatchNorm2d) and 'batch_norm' in name and 'layer_norm_after_act' not in name:
+            pre_activation_bn_count +=1
+    assert pre_activation_bn_count == 0, "Pre-activation BatchNorm2d layers should not be present"
+
+    input_tensor = torch.randn(1, *input_shape).to(device)
+    with torch.no_grad():
+        output_tensor = evolvable_cnn.forward(input_tensor)
+    assert output_tensor.shape == (1, num_outputs)
+    assert not evolvable_cnn.batch_norm
+
+def test_cnn_batch_norm_and_layer_norm(device):
+    input_shape, num_outputs = [3, 32, 32], 5
+    channel_size, kernel_size, stride_size = [16, 32], [3, 3], [1, 1]
+
+    evolvable_cnn = EvolvableCNN(
+        input_shape=input_shape,
+        num_outputs=num_outputs,
+        channel_size=channel_size,
+        kernel_size=kernel_size,
+        stride_size=stride_size,
+        batch_norm=True,
+        layer_norm=True,
+        block_type="Conv2d",
+        device=device,
+    )
+
+    pre_activation_bn_count = 0
+    post_activation_ln_count = 0
+    for name, module in evolvable_cnn.model.named_children():
+        if isinstance(module, torch.nn.BatchNorm2d):
+            if 'batch_norm' in name and 'layer_norm_after_act' not in name:
+                 pre_activation_bn_count +=1
+            elif 'layer_norm_after_act' in name:
+                 post_activation_ln_count +=1
+
+    assert pre_activation_bn_count == len(channel_size), "Incorrect number of pre-activation BatchNorm2d layers"
+    assert post_activation_ln_count == len(channel_size), "Incorrect number of post-activation BatchNorm2d (acting as LayerNorm) layers"
+
+    # Check order: Conv2d -> BatchNorm2d (pre) -> Activation -> BatchNorm2d (post, named layer_norm_after_act)
+    model_layers_with_names = list(evolvable_cnn.model.named_children())
+
+    for i in range(len(model_layers_with_names) - 3):
+        name_i, layer_i = model_layers_with_names[i]
+        name_i_plus_1, layer_i_plus_1 = model_layers_with_names[i+1]
+        name_i_plus_2, layer_i_plus_2 = model_layers_with_names[i+2]
+        name_i_plus_3, layer_i_plus_3 = model_layers_with_names[i+3]
+
+        if isinstance(layer_i, torch.nn.Conv2d):
+            assert isinstance(layer_i_plus_1, torch.nn.BatchNorm2d) and 'batch_norm' in name_i_plus_1 and 'layer_norm_after_act' not in name_i_plus_1, \
+                f"Conv2d ({name_i}) should be followed by pre-activation BatchNorm2d."
+            assert isinstance(layer_i_plus_2, (torch.nn.ReLU, torch.nn.ELU, torch.nn.Tanh, torch.nn.Sigmoid)), \
+                f"Pre-activation BatchNorm2d ({name_i_plus_1}) should be followed by Activation."
+            assert isinstance(layer_i_plus_3, torch.nn.BatchNorm2d) and 'layer_norm_after_act' in name_i_plus_3, \
+                f"Activation ({name_i_plus_2}) should be followed by post-activation BatchNorm2d (layer_norm_after_act)."
+
+
+    input_tensor = torch.randn(16, *input_shape).to(device)
+    with torch.no_grad():
+        output_tensor = evolvable_cnn.forward(input_tensor)
+    assert output_tensor.shape == (16, num_outputs)
+    assert evolvable_cnn.batch_norm
+    assert evolvable_cnn.layer_norm
+    assert evolvable_cnn.net_config["batch_norm"]
+
+
+def test_cnn_layer_norm_only(device):
+    input_shape, num_outputs = [3, 32, 32], 5
+    channel_size, kernel_size, stride_size = [16, 32], [3, 3], [1, 1]
+
+    evolvable_cnn = EvolvableCNN(
+        input_shape=input_shape,
+        num_outputs=num_outputs,
+        channel_size=channel_size,
+        kernel_size=kernel_size,
+        stride_size=stride_size,
+        batch_norm=False,
+        layer_norm=True,
+        block_type="Conv2d",
+        device=device,
+    )
+
+    pre_activation_bn_count = 0
+    post_activation_ln_count = 0
+    for name, module in evolvable_cnn.model.named_children():
+        if isinstance(module, torch.nn.BatchNorm2d):
+            if 'batch_norm' in name and 'layer_norm_after_act' not in name:
+                 pre_activation_bn_count +=1
+            elif 'layer_norm_after_act' in name:
+                 post_activation_ln_count +=1
+
+    assert pre_activation_bn_count == 0, "Pre-activation BatchNorm2d layers should not be present"
+    assert post_activation_ln_count == len(channel_size), "Incorrect number of post-activation BatchNorm2d (layer_norm_after_act)"
+
+    # Check order: Conv2d -> Activation -> BatchNorm2d (post, named layer_norm_after_act)
+    model_layers_with_names = list(evolvable_cnn.model.named_children())
+    for i in range(len(model_layers_with_names) - 2):
+        name_i, layer_i = model_layers_with_names[i]
+        name_i_plus_1, layer_i_plus_1 = model_layers_with_names[i+1]
+        name_i_plus_2, layer_i_plus_2 = model_layers_with_names[i+2]
+
+        if isinstance(layer_i, torch.nn.Conv2d):
+            assert isinstance(layer_i_plus_1, (torch.nn.ReLU, torch.nn.ELU, torch.nn.Tanh, torch.nn.Sigmoid)), \
+                f"Conv2d ({name_i}) should be followed by Activation."
+            assert isinstance(layer_i_plus_2, torch.nn.BatchNorm2d) and 'layer_norm_after_act' in name_i_plus_2, \
+                f"Activation ({name_i_plus_1}) should be followed by post-activation BatchNorm2d (layer_norm_after_act)."
+
+    input_tensor = torch.randn(1, *input_shape).to(device)
+    with torch.no_grad():
+        output_tensor = evolvable_cnn.forward(input_tensor)
+    assert output_tensor.shape == (1, num_outputs)
+    assert not evolvable_cnn.batch_norm
+    assert evolvable_cnn.layer_norm
+    assert not evolvable_cnn.net_config["batch_norm"]

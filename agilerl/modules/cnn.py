@@ -223,6 +223,7 @@ class EvolvableCNN(EvolvableModule):
         min_channel_size: int = 32,
         max_channel_size: int = 256,
         layer_norm: bool = False,
+        batch_norm: bool = False,
         init_layers: bool = True,
         device: str = "cpu",
         name: str = "cnn",
@@ -276,6 +277,7 @@ class EvolvableCNN(EvolvableModule):
         self.init_layers = init_layers
         self.sample_input = sample_input
         self.name = name
+        self.batch_norm = batch_norm
         self.mut_kernel_size = MutableKernelSizes(kernel_size, block_type, sample_input)
 
         self.model = self.create_cnn(
@@ -289,6 +291,7 @@ class EvolvableCNN(EvolvableModule):
     @property
     def net_config(self) -> Dict[str, Any]:
         net_config = self.init_dict.copy()
+        net_config["batch_norm"] = self.batch_norm
         for attr in ["input_shape", "num_outputs", "device", "name"]:
             net_config.pop(attr, None)
 
@@ -407,6 +410,7 @@ class EvolvableCNN(EvolvableModule):
             name=self.name,
             init_layers=self.init_layers,
             layer_norm=self.layer_norm,
+            batch_norm=self.batch_norm,
             activation_fn=self.activation,
             device=self.device,
         )

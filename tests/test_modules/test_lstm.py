@@ -294,3 +294,72 @@ def test_clone_instance(input_size, hidden_size, num_outputs, num_layers, device
 
     for key, param in clone_net.named_parameters():
         torch.testing.assert_close(param, original_net_dict[key]), evolvable_lstm
+
+
+# ---- Batch Norm Tests ----
+def test_lstm_batch_norm_true(device):
+    input_size, hidden_size, num_outputs, num_layers = 10, 64, 5, 1
+    evolvable_lstm = EvolvableLSTM(
+        input_size=input_size,
+        hidden_size=hidden_size,
+        num_outputs=num_outputs,
+        num_layers=num_layers,
+        batch_norm=True,
+        device=device,
+    )
+
+    # Check for BatchNorm1d layers
+    assert f"{evolvable_lstm.name}_bn_input" in evolvable_lstm.model, "Input BatchNorm1d layer is missing."
+    assert isinstance(evolvable_lstm.model[f"{evolvable_lstm.name}_bn_input"], torch.nn.BatchNorm1d), \
+        "Input BatchNorm layer is not of type BatchNorm1d."
+    assert evolvable_lstm.model[f"{evolvable_lstm.name}_bn_input"].num_features == input_size, \
+        "Input BatchNorm1d has incorrect number of features."
+
+    assert f"{evolvable_lstm.name}_bn_output" in evolvable_lstm.model, "Output BatchNorm1d layer is missing."
+    assert isinstance(evolvable_lstm.model[f"{evolvable_lstm.name}_bn_output"], torch.nn.BatchNorm1d), \
+        "Output BatchNorm layer is not of type BatchNorm1d."
+    assert evolvable_lstm.model[f"{evolvable_lstm.name}_bn_output"].num_features == hidden_size, \
+        "Output BatchNorm1d has incorrect number of features."
+
+    # Check order (implicitly checked by forward pass and model construction)
+    # LSTM Input: bn_input -> lstm
+    # LSTM Output: lstm -> bn_output -> linear_output
+
+    # Forward pass (batch size > 1 for BN)
+    # Input shape: (batch, seq_len, input_size)
+    input_tensor = torch.randn(16, 5, input_size).to(device)
+    with torch.no_grad():
+        output_tensor = evolvable_lstm.forward(input_tensor)
+    assert output_tensor.shape == (16, num_outputs)
+    assert evolvable_lstm.batch_norm
+    assert evolvable_lstm.net_config["batch_norm"]
+
+def test_lstm_batch_norm_false(device):
+    input_size, hidden_size, num_outputs, num_layers = 10, 64, 5, 1
+    evolvable_lstm = EvolvableLSTM(
+        input_size=input_size,
+        hidden_size=hidden_size,
+        num_outputs=num_outputs,
+        num_layers=num_layers,
+        batch_norm=False,
+        device=device,
+    )
+
+    assert f"{evolvable_lstm.name}_bn_input" not in evolvable_lstm.model, \
+        "Input BatchNorm1d layer should not be present."
+    assert f"{evolvable_lstm.name}_bn_output" not in evolvable_lstm.model, \
+        "Output BatchNorm1d layer should not be present."
+
+    # Forward pass
+    input_tensor = torch.randn(1, 5, input_size).to(device)
+    with torch.no_grad():
+        output_tensor = evolvable_lstm.forward(input_tensor)
+    assert output_tensor.shape == (1, num_outputs)
+    assert not evolvable_lstm.batch_norm
+    assert not evolvable_lstm.net_config["batch_norm"]
+
+# LSTM does not have a separate 'layer_norm' parameter like MLP/CNN.
+# Dropout is the closest equivalent for regularization between layers,
+# but batch_norm is about normalizing activations within a layer's features.
+# So, direct interaction tests like in MLP/CNN are not applicable here.
+# The main tests are batch_norm True vs False.

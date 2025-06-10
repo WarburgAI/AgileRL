@@ -265,3 +265,166 @@ def test_clone_instance(num_inputs, num_outputs, hidden_size, device):
     assert str(clone.state_dict()) == str(evolvable_mlp.state_dict())
     for key, param in clone_net.named_parameters():
         torch.testing.assert_close(param, original_net_dict[key]), evolvable_mlp
+
+
+# ---- Batch Norm Tests ----
+def check_module_order(model_sequential, target_sequence):
+    """
+    Helper function to check if a sequence of module types exists in a model.
+    target_sequence is a list of tuples, e.g., [(nn.BatchNorm1d, nn.ReLU), (nn.Linear, nn.BatchNorm1d)]
+    This means a BatchNorm1d should be followed by a ReLU, and somewhere else a Linear by a BatchNorm1d.
+    """
+    module_list = list(model_sequential)
+    found_all_sequences = True
+    for seq in target_sequence:
+        found_this_sequence = False
+        for i in range(len(module_list) - len(seq) + 1):
+            match = True
+            for j in range(len(seq)):
+                if not isinstance(module_list[i + j], seq[j]):
+                    match = False
+                    break
+            if match:
+                found_this_sequence = True
+                break
+        if not found_this_sequence:
+            found_all_sequences = False
+            break
+    return found_all_sequences
+
+def count_modules_by_type(model_sequential, module_type):
+    """Counts the number of modules of a specific type in a sequential model."""
+    count = 0
+    for module in model_sequential:
+        if isinstance(module, module_type):
+            count = count + 1
+    return count
+
+
+def test_mlp_batch_norm_true(device):
+    num_inputs, num_outputs, hidden_size = 10, 5, [32, 64]
+    evolvable_mlp = EvolvableMLP(
+        num_inputs=num_inputs,
+        num_outputs=num_outputs,
+        hidden_size=hidden_size,
+        batch_norm=True,
+        layer_norm=False,  # Ensure only batch_norm is tested here
+        device=device,
+    )
+
+    # Check for BatchNorm1d layers
+    assert count_modules_by_type(evolvable_mlp.model, torch.nn.BatchNorm1d) == len(hidden_size), "Incorrect number of BatchNorm1d layers"
+
+    # Check order: BatchNorm1d -> Activation
+    # The structure is [Linear, (BatchNorm1d), (LayerNorm), Activation, Linear, (BatchNorm1d), (LayerNorm), Activation, ..., OutputLinear, OutputActivation]
+    # We expect BatchNorm1d before Activation for hidden layers
+    expected_sequences = []
+    for i in range(len(hidden_size)):
+        # Linear -> BatchNorm1d -> Activation
+        expected_sequences.append((torch.nn.Linear, torch.nn.BatchNorm1d, torch.nn.ReLU)) # Assuming ReLU is default, adjust if not
+
+    # This check is a bit tricky due to the flexible nature of layer_norm.
+    # We will iterate through the model and check the immediate successor of BatchNorm1d.
+    model_layers = list(evolvable_mlp.model.children())
+    bn_indices = [i for i, layer in enumerate(model_layers) if isinstance(layer, torch.nn.BatchNorm1d)]
+
+    for bn_idx in bn_indices:
+        # Ensure BN is not the last layer and is followed by an activation (or another norm if that's the design)
+        assert bn_idx + 1 < len(model_layers), "BatchNorm1d should not be the last layer in a hidden block."
+        # Here, we assume activation is ReLU. If other activations are used by default, this needs to be more flexible.
+        assert isinstance(model_layers[bn_idx+1], (torch.nn.ReLU, torch.nn.ELU, torch.nn.Tanh, torch.nn.Sigmoid, NoisyLinear)), \
+            f"BatchNorm1d at index {bn_idx} should be followed by an activation, found {type(model_layers[bn_idx+1])}"
+
+    # Forward pass
+    input_tensor = torch.randn(16, num_inputs).to(device) # Using a batch size > 1 for BN
+    with torch.no_grad():
+        output_tensor = evolvable_mlp.forward(input_tensor)
+    assert output_tensor.shape == (16, num_outputs)
+    assert evolvable_mlp.batch_norm # Check attribute
+
+def test_mlp_batch_norm_false(device):
+    num_inputs, num_outputs, hidden_size = 10, 5, [32, 64]
+    evolvable_mlp = EvolvableMLP(
+        num_inputs=num_inputs,
+        num_outputs=num_outputs,
+        hidden_size=hidden_size,
+        batch_norm=False,
+        device=device,
+    )
+    assert count_modules_by_type(evolvable_mlp.model, torch.nn.BatchNorm1d) == 0, "BatchNorm1d layers should not be present"
+
+    # Forward pass
+    input_tensor = torch.randn(1, num_inputs).to(device)
+    with torch.no_grad():
+        output_tensor = evolvable_mlp.forward(input_tensor)
+    assert output_tensor.shape == (1, num_outputs)
+    assert not evolvable_mlp.batch_norm # Check attribute
+
+def test_mlp_batch_norm_and_layer_norm(device):
+    num_inputs, num_outputs, hidden_size = 10, 5, [32, 64]
+    evolvable_mlp = EvolvableMLP(
+        num_inputs=num_inputs,
+        num_outputs=num_outputs,
+        hidden_size=hidden_size,
+        batch_norm=True,
+        layer_norm=True,
+        device=device,
+    )
+    assert count_modules_by_type(evolvable_mlp.model, torch.nn.BatchNorm1d) == len(hidden_size)
+    assert count_modules_by_type(evolvable_mlp.model, torch.nn.LayerNorm) == len(hidden_size) + evolvable_mlp.output_layernorm # +1 if output_layernorm is True
+
+    # Check order: Linear -> BatchNorm1d -> LayerNorm -> Activation for hidden layers
+    # This check needs to be more robust. Iterate and find sequences.
+    model_layers = list(evolvable_mlp.model.children())
+    for i in range(len(model_layers) - 3): # Iterate up to where a sequence of 4 can start
+        if isinstance(model_layers[i], torch.nn.Linear) and \
+           not evolvable_mlp.model[i].out_features == num_outputs: # Exclude output linear layer for this check
+            # This linear layer is a hidden layer
+            assert isinstance(model_layers[i+1], torch.nn.BatchNorm1d), \
+                f"Linear layer at {i} should be followed by BatchNorm1d, found {type(model_layers[i+1])}"
+            assert isinstance(model_layers[i+2], torch.nn.LayerNorm), \
+                f"BatchNorm1d at {i+1} should be followed by LayerNorm, found {type(model_layers[i+2])}"
+            assert isinstance(model_layers[i+3], (torch.nn.ReLU, torch.nn.ELU, torch.nn.Tanh, torch.nn.Sigmoid)), \
+                f"LayerNorm at {i+2} should be followed by Activation, found {type(model_layers[i+3])}"
+
+
+    # Forward pass
+    input_tensor = torch.randn(16, num_inputs).to(device)
+    with torch.no_grad():
+        output_tensor = evolvable_mlp.forward(input_tensor)
+    assert output_tensor.shape == (16, num_outputs)
+    assert evolvable_mlp.batch_norm
+    assert evolvable_mlp.layer_norm
+    assert evolvable_mlp.net_config["batch_norm"]
+
+def test_mlp_layer_norm_only(device):
+    num_inputs, num_outputs, hidden_size = 10, 5, [32, 64]
+    evolvable_mlp = EvolvableMLP(
+        num_inputs=num_inputs,
+        num_outputs=num_outputs,
+        hidden_size=hidden_size,
+        batch_norm=False,
+        layer_norm=True,
+        device=device,
+    )
+    assert count_modules_by_type(evolvable_mlp.model, torch.nn.BatchNorm1d) == 0
+    assert count_modules_by_type(evolvable_mlp.model, torch.nn.LayerNorm) == len(hidden_size) + evolvable_mlp.output_layernorm
+
+    # Check order: Linear -> LayerNorm -> Activation for hidden layers
+    model_layers = list(evolvable_mlp.model.children())
+    for i in range(len(model_layers) - 2):
+        if isinstance(model_layers[i], torch.nn.Linear) and \
+           not evolvable_mlp.model[i].out_features == num_outputs:
+            assert isinstance(model_layers[i+1], torch.nn.LayerNorm), \
+                f"Linear layer at {i} should be followed by LayerNorm, found {type(model_layers[i+1])}"
+            assert isinstance(model_layers[i+2], (torch.nn.ReLU, torch.nn.ELU, torch.nn.Tanh, torch.nn.Sigmoid)), \
+                f"LayerNorm at {i+1} should be followed by Activation, found {type(model_layers[i+2])}"
+
+    # Forward pass
+    input_tensor = torch.randn(1, num_inputs).to(device)
+    with torch.no_grad():
+        output_tensor = evolvable_mlp.forward(input_tensor)
+    assert output_tensor.shape == (1, num_outputs)
+    assert not evolvable_mlp.batch_norm
+    assert evolvable_mlp.layer_norm
+    assert not evolvable_mlp.net_config["batch_norm"]

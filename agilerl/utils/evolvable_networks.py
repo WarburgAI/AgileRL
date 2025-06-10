@@ -434,6 +434,7 @@ def create_cnn(
     name: str = "cnn",
     init_layers: bool = True,
     layer_norm: bool = False,
+    batch_norm: bool = False,  # Added batch_norm parameter
     activation_fn: str = "ReLU",
     device: DeviceType = "cpu",
 ) -> Dict[str, nn.Module]:
@@ -456,6 +457,8 @@ def create_cnn(
     :type init_layers: bool, optional
     :param layer_norm: Whether to use layer normalization. Defaults to False.
     :type layer_norm: bool, optional
+    :param batch_norm: Whether to use batch normalization. Defaults to False. # Added batch_norm parameter
+    :type batch_norm: bool, optional # Added batch_norm parameter
     :param activation_fn: Activation function to use. Defaults to "ReLU".
     :type activation_fn: str, optional
     :param device: Device to use. Defaults to "cpu".
@@ -479,8 +482,14 @@ def create_cnn(
             net_dict[f"{name}_conv_layer_{str(l_no)}"] = layer_init(
                 net_dict[f"{name}_conv_layer_{str(l_no)}"]
             )
+        if batch_norm:
+            net_dict[f"{name}_batch_norm_{str(l_no)}"] = get_batch_norm_layer(
+                block_type.replace("Conv", ""),
+                num_features=channel_size[l_no],
+                device=device,
+            )
         if layer_norm:
-            net_dict[f"{name}_layer_norm_{str(l_no)}"] = get_batch_norm_layer(
+            net_dict[f"{name}_layer_norm_after_act_{str(l_no)}"] = get_batch_norm_layer( # Renamed layer_norm
                 block_type.replace("Conv", ""),
                 num_features=channel_size[l_no],
                 device=device,
@@ -502,6 +511,7 @@ def create_mlp(
     noisy: bool = False,
     init_layers: bool = True,
     layer_norm: bool = False,
+    batch_norm: bool = False,  # Added batch_norm parameter
     output_layernorm: bool = False,
     activation: str = "ReLU",
     noise_std: float = 0.1,
@@ -527,6 +537,8 @@ def create_mlp(
     :type init_layers: bool, optional
     :param layer_norm: Whether to use layer normalization.
     :type layer_norm: bool, optional
+    :param batch_norm: Whether to use batch normalization.  # Added batch_norm parameter
+    :type batch_norm: bool, optional  # Added batch_norm parameter
     :param output_layernorm: Whether to use layer normalization for the output layer.
     :type output_layernorm: bool, optional
     :param activation: Activation function for hidden layers.
@@ -555,6 +567,9 @@ def create_mlp(
             net_dict[f"{name}_linear_layer_{str(l_no)}"] = layer_init(
                 net_dict[f"{name}_linear_layer_{str(l_no)}"]
             )
+
+        if batch_norm: # Add batch normalization
+            net_dict[f"{name}_batch_norm_{str(l_no)}"] = nn.BatchNorm1d(hidden_size[l_no], device=device)
 
         if layer_norm:  # Add layer normalization
             net_dict[f"{name}_layer_norm_{str(l_no)}"] = nn.LayerNorm(
