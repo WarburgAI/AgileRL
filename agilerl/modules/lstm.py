@@ -175,15 +175,12 @@ class EvolvableLSTM(EvolvableModule):
             x = x.unsqueeze(0)
 
         if self.batch_norm:
-            # Permute for BatchNorm1d: (batch, seq_len, input_size) -> (batch, input_size, seq_len)
             x = x.permute(0, 2, 1)
             x = self.model[f"{self.name}_bn_input"](x)
-            # Permute back: (batch, input_size, seq_len) -> (batch, seq_len, input_size)
             x = x.permute(0, 2, 1)
 
         lstm_output, lstm_states = self.model[f"{self.name}_lstm"](x)
 
-        # Select the output of the last time step
         lstm_output_last_step = lstm_output[:, -1, :]
 
         if self.batch_norm:
