@@ -778,7 +778,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             pickle_module=dill,
         )
 
-    def load_checkpoint(self, path: str) -> None:
+    def load_checkpoint(self, path: str, ignore_attributes: List[str] = []) -> None:
         """Loads saved agent properties and network weights from checkpoint.
 
         :param path: Location to load checkpoint from
@@ -872,6 +872,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         # Load other attributes
         checkpoint.pop("network_info")
         for attribute in checkpoint.keys():
+            if attribute in ignore_attributes:
+                continue
             setattr(self, attribute, checkpoint[attribute])
 
         # Wrap models / compile if necessary
