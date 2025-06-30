@@ -792,7 +792,7 @@ def test_save_load_checkpoint_correct_data_and_format(
     ppo.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
-    checkpoint = torch.load(checkpoint_path, pickle_module=dill)
+    checkpoint = torch.load(checkpoint_path, pickle_module=dill, weights_only=False)
 
     # Check if the loaded checkpoint has the correct keys
     assert "actor_init_dict" in checkpoint["network_info"]["modules"]
@@ -885,7 +885,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     ppo.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
-    checkpoint = torch.load(checkpoint_path, pickle_module=dill)
+    checkpoint = torch.load(checkpoint_path, pickle_module=dill, weights_only=False)
 
     # Check if the loaded checkpoint has the correct keys
     assert "actor_init_dict" in checkpoint["network_info"]["modules"]
@@ -1156,6 +1156,7 @@ def test_rollout_buffer_initialization_recurrent():
     assert buffer.hidden_state_architecture is not None
     assert buffer.buffer.get("hidden_states") is not None
 
+
 # Test adding samples to the buffer
 def test_rollout_buffer_add():
     observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
@@ -1207,7 +1208,7 @@ def test_rollout_buffer_add():
         buffer.add(obs, action, reward, done, value, log_prob, next_obs)
 
     assert buffer.pos == buffer.capacity  # pos is next insertion point
-    assert buffer.full is True # Buffer is full when pos reaches capacity
+    assert buffer.full is True  # Buffer is full when pos reaches capacity
 
     buffer.reset()
 
@@ -1247,8 +1248,8 @@ def test_rollout_buffer_compute_returns_and_advantages():
         buffer.add(obs, action, reward, done, value, log_prob, next_obs)
 
     # Compute returns and advantages
-    last_value = torch.tensor([[0.0]], device=device) # Shape (num_envs, 1)
-    last_done = torch.tensor([[0.0]], device=device)   # Shape (num_envs, 1)
+    last_value = torch.tensor([[0.0]], device=device)  # Shape (num_envs, 1)
+    last_done = torch.tensor([[0.0]], device=device)  # Shape (num_envs, 1)
     buffer.compute_returns_and_advantages(last_value, last_done)
 
     # Check that returns and advantages are computed
@@ -1302,7 +1303,7 @@ def test_rollout_buffer_get_batch():
     buffer.compute_returns_and_advantages(last_value, last_done)
 
     # Get all data (up to current pos)
-    batch = buffer.get() # Gets all data up to buffer.pos
+    batch = buffer.get()  # Gets all data up to buffer.pos
 
     assert len(batch["observations"]) == num_samples
     assert len(batch["actions"]) == num_samples
@@ -1433,7 +1434,6 @@ def test_ppo_learn_with_rollout_buffer():
     last_done = torch.zeros((ppo.num_envs, 1), device=ppo.device)
     ppo.rollout_buffer.compute_returns_and_advantages(last_value, last_done)
 
-
     # Learn from rollout buffer
     loss = ppo.learn()
 
@@ -1460,7 +1460,9 @@ def test_ppo_with_hidden_states():
     )
 
     # Get action with hidden state
-    obs = np.random.rand(1, *observation_space.shape).astype(observation_space.dtype) # Add batch dim for num_envs=1
+    obs = np.random.rand(1, *observation_space.shape).astype(
+        observation_space.dtype
+    )  # Add batch dim for num_envs=1
     hidden_state = ppo.get_initial_hidden_state()
 
     action, log_prob, entropy, value, next_hidden = ppo.get_action(
@@ -1472,7 +1474,11 @@ def test_ppo_with_hidden_states():
     assert isinstance(entropy, np.ndarray)
     assert isinstance(value, np.ndarray)
     assert next_hidden is not None
-    assert next_hidden.get("shared_encoder_h", None).shape == (1, 1, 64) # (directions, num_envs, hidden_size)
+    assert next_hidden.get("shared_encoder_h", None).shape == (
+        1,
+        1,
+        64,
+    )  # (directions, num_envs, hidden_size)
     assert next_hidden.get("shared_encoder_c", None).shape == (1, 1, 64)
 
 
@@ -1593,7 +1599,7 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts():
     )
     # Check actions for all envs at the first timestep
     assert ppo.rollout_buffer.buffer.get("actions") is not None
-    
+
     hidden_states = ppo.rollout_buffer.buffer.get("hidden_states")
     assert hidden_states is not None
     assert hidden_states.get("shared_encoder_h") is not None
@@ -1602,8 +1608,8 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts():
     # Verify hidden states were properly stored (first step's hidden state)
     assert hidden_states.get("shared_encoder_h")[0].shape == (
         num_envs,
-        1, # num_layers * directions
-        64, # hidden_size
+        1,  # num_layers * directions
+        64,  # hidden_size
     )
     assert hidden_states.get("shared_encoder_c")[0].shape == (
         num_envs,
@@ -1663,12 +1669,16 @@ def test_ppo_with_hidden_states_multiple_envs_collect_rollouts_and_test():
     assert ppo.rollout_buffer.buffer.get("hidden_states") is not None
 
     # Verify hidden states were properly stored
-    assert ppo.rollout_buffer.buffer.get("hidden_states").get("shared_encoder_h")[0].shape == (
+    assert ppo.rollout_buffer.buffer.get("hidden_states").get("shared_encoder_h")[
+        0
+    ].shape == (
         num_envs,
         1,
         64,
     )
-    assert ppo.rollout_buffer.buffer.get("hidden_states").get("shared_encoder_c")[0].shape == (
+    assert ppo.rollout_buffer.buffer.get("hidden_states").get("shared_encoder_c")[
+        0
+    ].shape == (
         num_envs,
         1,
         64,
@@ -1697,7 +1707,7 @@ def test_ppo_collect_rollouts():
         action_space=action_space,
         use_rollout_buffer=True,
         learn_step=learn_step,
-        num_envs=1, # Explicitly set num_envs for clarity
+        num_envs=1,  # Explicitly set num_envs for clarity
     )
 
     env = DummyEnv(state_size=observation_space.shape, vect=True, num_envs=ppo.num_envs)
@@ -1740,7 +1750,7 @@ def test_ppo_wrap_at_capacity():
         observation_space=observation_space,
         action_space=action_space,
         use_rollout_buffer=True,
-        learn_step=10, # This sets rollout_buffer.capacity
+        learn_step=10,  # This sets rollout_buffer.capacity
         num_envs=1,
         rollout_buffer_config={"wrap_at_capacity": True},
     )
@@ -1752,7 +1762,7 @@ def test_ppo_wrap_at_capacity():
     # Here, n_steps == capacity, so it fills up.
     ppo.collect_rollouts(env, n_steps=10)
 
-    assert ppo.rollout_buffer.pos == 10 # pos is next insertion point, so it's capacity
+    assert ppo.rollout_buffer.pos == 10  # pos is next insertion point, so it's capacity
     assert ppo.rollout_buffer.full is True
 
     # Collect 7 more steps. Since wrap_at_capacity is True, it will wrap around.
@@ -1762,7 +1772,7 @@ def test_ppo_wrap_at_capacity():
     ppo.collect_rollouts(env, n_steps=7)
 
     assert ppo.rollout_buffer.pos == 7
-    assert ppo.rollout_buffer.full is False # Not full yet, capacity is 10
+    assert ppo.rollout_buffer.full is False  # Not full yet, capacity is 10
 
     # Collect 14 steps. This is > capacity.
     # If wrap_at_capacity, it should reset and fill.
@@ -1796,7 +1806,7 @@ def test_ppo_backward_compatibility():
         observation_space=observation_space,
         action_space=action_space,
         use_rollout_buffer=True,
-        num_envs=1, # For consistency with how experiences are shaped
+        num_envs=1,  # For consistency with how experiences are shaped
     )
 
     # Create PPO with old implementation
@@ -1806,7 +1816,7 @@ def test_ppo_backward_compatibility():
         use_rollout_buffer=False,
         num_envs=1,
     )
-    
+
     # Prepare experiences in old format
     num_steps = 5
     states = torch.rand(num_steps, *observation_space.shape)
