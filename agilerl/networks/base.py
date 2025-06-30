@@ -229,6 +229,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         self.flatten_obs = False
         self.encoder_name = encoder_name
         self.cached_hidden_state = None
+        self.cached_hidden_state_batch_size = None
+        self.cached_hidden_state_device = None
 
         encoder_config = (
             encoder_config
@@ -423,7 +425,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                     std_coeff=std_coeff, output_coeff=output_coeff
                 )
 
-    def initialize_hidden_state(self, batch_size: int = 1) -> Dict[str, torch.Tensor]:
+    def initialize_hidden_state(
+        self, device: DeviceType, batch_size: int = 1
+    ) -> Dict[str, torch.Tensor]:
         """Initialize the hidden state for the network.
 
         :param env: The environment to initialize the hidden state for
@@ -436,9 +440,11 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 self.cached_hidden_state is None
                 or len(self.cached_hidden_state) == 0
                 or self.cached_hidden_state_batch_size != batch_size
+                or self.cached_hidden_state_device != device
             ):
                 self.cached_hidden_state = {}
                 self.cached_hidden_state_batch_size = batch_size
+                self.cached_hidden_state_device = device
                 for name, shape in get_hidden_states_shape_from_model(
                     self.encoder
                 ).items():
@@ -446,7 +452,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                     shape = tuple(
                         batch_size if x == BatchDimension else x for x in shape
                     )
-                    self.cached_hidden_state[name] = torch.zeros(shape).to(self.device)
+                    self.cached_hidden_state[name] = torch.zeros(shape).to(device)
+
             return deepcopy(self.cached_hidden_state)
         else:
             raise ValueError(
