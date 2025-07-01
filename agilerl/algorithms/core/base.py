@@ -34,6 +34,8 @@ from numpy.typing import ArrayLike
 from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
 
+from agilerl.components.rollout_buffer import RolloutBuffer
+
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
     MutationRegistry,
@@ -367,7 +369,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         # Exclude attributes that are EvolvableModule or Optimizer objects (also check for nested
         # module-related attributes for multi-agent algorithms)
         exclude = list(agent.evolvable_attributes().keys())
-        exclude += [attr for attr, val in attributes if isinstance(val, TensorDict)]
+        exclude += [attr for attr, val in attributes if isinstance(val, (TensorDict, RolloutBuffer))]
 
         # Exclude private and built-in attributes
         attributes = [
@@ -640,6 +642,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             on_device.append(exp)
 
         return on_device
+
 
     def evolvable_attributes(
         self, networks_only: bool = False
