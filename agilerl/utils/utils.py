@@ -3,7 +3,6 @@ import warnings
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Union
 
-from agilerl.algorithms.core.base import RLAlgorithm
 import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
@@ -23,8 +22,6 @@ from agilerl.algorithms import (
     MADDPG,
     MATD3,
     PPO,
-    CPPO,
-    ICM_PPO,
     TD3,
     NeuralTS,
     NeuralUCB,
@@ -35,13 +32,14 @@ from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.base import EvolvableModule
-from agilerl.typing import GymEnvType, GymSpaceType, PopulationType
+from agilerl.typing import GymSpaceType, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 SupportedObservationSpace = Union[
     spaces.Box, spaces.Discrete, spaces.Dict, spaces.Tuple
 ]
+
 
 def make_vect_envs(
     env_name: Optional[str] = None,
@@ -112,8 +110,6 @@ def make_skill_vect_envs(
     :type num_envs: int, optional
     """
     return gym.vector.AsyncVectorEnv(
-        [lambda: skill(gym.make(env_name)) for i in range(num_envs)]
-    )
         [lambda: skill(gym.make(env_name)) for i in range(num_envs)]
     )
 
@@ -210,8 +206,6 @@ def create_population(
     :type population_size: int, optional
     :param num_envs: Number of vectorized environments, defaults to 1
     :type num_envs: int, optional
-    :param num_envs: Number of vectorized environments, defaults to 1
-    :type num_envs: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -225,7 +219,6 @@ def create_population(
     """
 
     population = []
-    if algo == "DQN":
     if algo == "DQN":
         for idx in range(population_size):
             agent = DQN(
@@ -255,7 +248,6 @@ def create_population(
                 action_space=action_space,
                 index=idx,
                 hp_config=hp_config,
-                hp_config=hp_config,
                 net_config=net_config,
                 batch_size=INIT_HP.get("BATCH_SIZE", 64),
                 lr=INIT_HP.get("LR", 0.0001),
@@ -275,7 +267,6 @@ def create_population(
             )
             population.append(agent)
 
-    elif algo == "DDPG":
     elif algo == "DDPG":
         for idx in range(population_size):
             agent = DDPG(
@@ -542,7 +533,6 @@ def create_population(
                 observation_space=observation_space,
                 action_space=action_space,
                 index=idx,
-                hp_config=hp_config,
                 hp_config=hp_config,
                 net_config=net_config,
                 gamma=INIT_HP.get("GAMMA", 1),
@@ -886,7 +876,6 @@ def print_hyperparams(pop: PopulationType) -> None:
         )
 
 
-def plot_population_score(pop: PopulationType) -> None:
 def plot_population_score(pop: PopulationType) -> None:
     """Plots the fitness scores of agents in a population.
 

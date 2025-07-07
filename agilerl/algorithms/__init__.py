@@ -1,9 +1,11 @@
 from .bc_lm import BC_LM, BC_Evaluator, BC_Policy
 from .cqn import CQN
+from .cvar_ppo import CPPO
 from .ddpg import DDPG
 from .dqn import DQN
 from .dqn_rainbow import RainbowDQN
 from .grpo import GRPO
+from .icm_ppo import ICM_PPO
 from .ilql import ILQL
 from .ippo import IPPO
 from .maddpg import MADDPG
@@ -12,8 +14,6 @@ from .neural_ts_bandit import NeuralTS
 from .neural_ucb_bandit import NeuralUCB
 from .ppo import PPO
 from .td3 import TD3
-from .cvar_ppo import CPPO
-from .icm_ppo import ICM_PPO
 
 __all__ = [
     "BC_LM",
