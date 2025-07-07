@@ -1,7 +1,9 @@
 .. figure:: https://user-images.githubusercontent.com/47857277/222710068-e09a4e3c-368c-458a-9e01-b68674806887.png
+.. figure:: https://user-images.githubusercontent.com/47857277/222710068-e09a4e3c-368c-458a-9e01-b68674806887.png
    :height: 120
    :align: center
 
+   |License| |Docs status| |PyPI download total| |Discord|
    |License| |Docs status| |PyPI download total| |Discord|
 
 .. |License| image:: https://img.shields.io/badge/License-Apache_2.0-blue.svg
@@ -10,11 +12,21 @@
 .. |Docs status| image:: https://readthedocs.org/projects/agilerl/badge/?version=latest
    :target: https://agilerl.readthedocs.io/en/latest/?badge=latest
 
+
 .. |PyPI download total| image:: https://static.pepy.tech/badge/agilerl
    :target: https://pypi.python.org/pypi/agilerl/
 
 .. |Discord| image:: https://dcbadge.vercel.app/api/server/eB8HyTA2ux?style=flat
    :target: https://discord.gg/eB8HyTA2ux
+
+Streamlining reinforcement learning.
+====================================
+
+.. highlights::
+
+   **✨ NEW: AgileRL 2.0 is here! Check out the latest powerful** :ref:`updates <agilerl2changes>` **✨**
+
+   **🚀 Train super-fast for free on** `Arena <https://arena.agilerl.com>`_ **, the RLOps platform from AgileRL 🚀**
 
 Streamlining reinforcement learning.
 ====================================
@@ -32,6 +44,33 @@ Evolutionary HPO has been shown to drastically reduce overall training times by 
 We are constantly adding more algorithms and features. AgileRL already includes state-of-the-art evolvable on-policy, off-policy, offline and multi-agent reinforcement learning algorithms with distributed training.
 
 Join the AgileRL `Discord server <https://discord.com/invite/eB8HyTA2ux>`_ to ask questions, get help, and learn more about reinforcement learning.
+We are constantly adding more algorithms and features. AgileRL already includes state-of-the-art evolvable on-policy, off-policy, offline and multi-agent reinforcement learning algorithms with distributed training.
+
+Join the AgileRL `Discord server <https://discord.com/invite/eB8HyTA2ux>`_ to ask questions, get help, and learn more about reinforcement learning.
+
+.. figure:: https://user-images.githubusercontent.com/47857277/236407686-21363eb3-ffcf-419f-b019-0be4ddf1ed4a.gif
+   :width: 900px
+   :align: center
+
+   AgileRL offers 10x faster hyperparameter optimization than SOTA.
+
+   Global steps is the sum of every step taken by any agent in the environment, including across an entire population, during the entire hyperparameter optimization process.
+
+Installation
+------------
+
+Install as a package with pip:
+
+.. code-block:: bash
+
+   pip install agilerl
+
+Or install in development mode:
+
+.. code-block:: bash
+
+   git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
+   pip install -e .
 
 .. figure:: https://user-images.githubusercontent.com/47857277/236407686-21363eb3-ffcf-419f-b019-0be4ddf1ed4a.gif
    :width: 900px
@@ -62,6 +101,8 @@ Contents
 --------
 
 .. toctree::
+   :maxdepth: 1
+   :caption: Introduction
    :maxdepth: 1
    :caption: Introduction
 

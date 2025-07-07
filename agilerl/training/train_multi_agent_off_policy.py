@@ -277,7 +277,6 @@ def train_multi_agent_off_policy(
                 scores += score_increment
                 total_steps += num_envs
                 steps += num_envs
-
                 # Save experience to replay buffer
                 if swap_channels:
                     if not is_vectorised:

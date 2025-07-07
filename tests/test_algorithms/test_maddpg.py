@@ -347,7 +347,6 @@ def test_initialize_maddpg_with_net_config(
     else:
         assert all(isinstance(actor, DeterministicActor) for actor in maddpg.actors)
         assert all(isinstance(critic, ContinuousQNetwork) for critic in maddpg.critics)
-
     if accelerator is None:
         assert all(
             isinstance(actor_optimizer, optim.Adam)

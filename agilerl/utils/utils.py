@@ -106,9 +106,14 @@ def make_skill_vect_envs(
     :param skill: Skill wrapper to apply to environment
     :type skill: agilerl.wrappers.learning.Skill
     :param num_envs: Number of vectorized environments, defaults to 1
+    :param skill: Skill wrapper to apply to environment
+    :type skill: agilerl.wrappers.learning.Skill
+    :param num_envs: Number of vectorized environments, defaults to 1
     :type num_envs: int, optional
     """
     return gym.vector.AsyncVectorEnv(
+        [lambda: skill(gym.make(env_name)) for i in range(num_envs)]
+    )
         [lambda: skill(gym.make(env_name)) for i in range(num_envs)]
     )
 
@@ -181,6 +186,12 @@ def create_population(
     :type action_space: spaces.Space
     :param net_config: Network configuration
     :type net_config: dict or None
+    :param observation_space: Observation space
+    :type observation_space: spaces.Space
+    :param action_space: Action space
+    :type action_space: spaces.Space
+    :param net_config: Network configuration
+    :type net_config: dict or None
     :param INIT_HP: Initial hyperparameters
     :type INIT_HP: dict
     :param hp_config: Choice of algorithm hyperparameters to mutate during training, defaults to None
@@ -189,8 +200,16 @@ def create_population(
     :type actor_network: nn.Module, optional
     :param critic_network: Custom critic network, defaults to None
     :type critic_network: nn.Module, optional
+    :param hp_config: Choice of algorithm hyperparameters to mutate during training, defaults to None
+    :type hp_config: HyperparameterConfig, optional
+    :param actor_network: Custom actor network, defaults to None
+    :type actor_network: nn.Module, optional
+    :param critic_network: Custom critic network, defaults to None
+    :type critic_network: nn.Module, optional
     :param population_size: Number of agents in population, defaults to 1
     :type population_size: int, optional
+    :param num_envs: Number of vectorized environments, defaults to 1
+    :type num_envs: int, optional
     :param num_envs: Number of vectorized environments, defaults to 1
     :type num_envs: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
@@ -206,6 +225,7 @@ def create_population(
     """
 
     population = []
+    if algo == "DQN":
     if algo == "DQN":
         for idx in range(population_size):
             agent = DQN(
@@ -235,6 +255,7 @@ def create_population(
                 action_space=action_space,
                 index=idx,
                 hp_config=hp_config,
+                hp_config=hp_config,
                 net_config=net_config,
                 batch_size=INIT_HP.get("BATCH_SIZE", 64),
                 lr=INIT_HP.get("LR", 0.0001),
@@ -254,6 +275,7 @@ def create_population(
             )
             population.append(agent)
 
+    elif algo == "DDPG":
     elif algo == "DDPG":
         for idx in range(population_size):
             agent = DDPG(
@@ -520,6 +542,7 @@ def create_population(
                 observation_space=observation_space,
                 action_space=action_space,
                 index=idx,
+                hp_config=hp_config,
                 hp_config=hp_config,
                 net_config=net_config,
                 gamma=INIT_HP.get("GAMMA", 1),
@@ -844,8 +867,16 @@ def print_hyperparams(pop: PopulationType) -> None:
 
     :param pop: Population of agents
     :type pop: list[EvolvableAlgorithm]
+    :type pop: list[EvolvableAlgorithm]
     """
     for agent in pop:
+        print(
+            "Agent ID: {}    Mean 5 Fitness: {:.2f}    Attributes: {}".format(
+                agent.index,
+                np.mean(agent.fitness[-5:]),
+                EvolvableAlgorithm.inspect_attributes(agent),
+            )
+        )
         print(
             "Agent ID: {}    Mean 5 Fitness: {:.2f}    Attributes: {}".format(
                 agent.index,
@@ -856,9 +887,11 @@ def print_hyperparams(pop: PopulationType) -> None:
 
 
 def plot_population_score(pop: PopulationType) -> None:
+def plot_population_score(pop: PopulationType) -> None:
     """Plots the fitness scores of agents in a population.
 
     :param pop: Population of agents
+    :type pop: list[EvolvableAlgorithm]
     :type pop: list[EvolvableAlgorithm]
     """
     plt.figure()
