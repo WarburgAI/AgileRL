@@ -528,7 +528,7 @@ class ICM_PPO(RLAlgorithm):
     def create_rollout_buffer(self) -> None:
         """Creates a rollout buffer with the current configuration and adds space for encoder_out."""
         self.rollout_buffer = RolloutBuffer(
-            capacity=self.learn_step // self.num_envs,
+            capacity=self.learn_step,
             observation_space=self.observation_space,
             action_space=self.action_space,
             device=self.device,
@@ -795,7 +795,7 @@ class ICM_PPO(RLAlgorithm):
         encoder_last_output = None
         encoder_output = None
         last_obs = None
-        for _ in range(n_steps // self.num_envs):
+        for _ in range(n_steps):
             # Get action
             if self.recurrent:
                 returned_tuple = self.get_action(
