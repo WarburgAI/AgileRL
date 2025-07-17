@@ -340,7 +340,7 @@ class PPO(RLAlgorithm):
     def create_rollout_buffer(self) -> None:
         """Creates a rollout buffer with the current configuration."""
         self.rollout_buffer = RolloutBuffer(
-            capacity=self.learn_step,
+            capacity=self.learn_step // self.num_envs,
             observation_space=self.observation_space,
             action_space=self.action_space,
             device=self.device,
@@ -855,7 +855,6 @@ class PPO(RLAlgorithm):
                     pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                     # Value loss
-                    value = value.view(-1)
                     v_loss_unclipped = (value - batch_returns) ** 2
                     v_clipped = batch_values + torch.clamp(
                         value - batch_values, -self.clip_coef, self.clip_coef
@@ -977,6 +976,7 @@ class PPO(RLAlgorithm):
                     minibatch_indices
                 ]  # Use globally normalized advantages
                 mb_returns = minibatch_td["returns"]
+                mb_old_values = minibatch_td["values"]
 
                 eval_hidden_state = None
                 if self.recurrent:
@@ -1014,7 +1014,14 @@ class PPO(RLAlgorithm):
                 )
                 policy_loss = torch.max(policy_loss1, policy_loss2).mean()
 
-                value_loss = 0.5 * ((new_value_t - mb_returns) ** 2).mean()
+                # Change to clipped value loss
+                v_loss_unclipped = (new_value_t - mb_returns) ** 2
+                v_clipped = mb_old_values + torch.clamp(
+                    new_value_t - mb_old_values, -self.clip_coef, self.clip_coef
+                )
+                v_loss_clipped = (v_clipped - mb_returns) ** 2
+                value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+
                 entropy_loss = -entropy_t.mean()
 
                 loss = (
@@ -1027,9 +1034,10 @@ class PPO(RLAlgorithm):
                     log_ratio = new_log_prob_t - mb_old_log_probs
                     approx_kl = ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
                     kl_sum += approx_kl
-                    clipfrac_sum += torch.mean(
+                    clipfrac = torch.mean(
                         (torch.abs(ratio - 1.0) > self.clip_coef).float()
                     ).item()
+                    clipfrac_sum += clipfrac
 
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -1243,6 +1251,9 @@ class PPO(RLAlgorithm):
                 mb_returns_seq = current_minibatch_td[
                     "returns"
                 ]  # Shape: (batch_seq, seq_len)
+                mb_old_values_seq = current_minibatch_td[
+                    "values"
+                ]  # Shape: (batch_seq, seq_len)
 
                 mb_initial_hidden_states_dict = current_minibatch_td.get_non_tensor(
                     "initial_hidden_states", default=None
@@ -1296,7 +1307,17 @@ class PPO(RLAlgorithm):
                         ratio, 1 - self.clip_coef, 1 + self.clip_coef
                     )
                     policy_loss_total += torch.max(policy_loss1, policy_loss2).mean()
-                    value_loss_total += 0.5 * ((new_value_t - return_t) ** 2).mean()
+
+                    # Change to clipped value loss accumulation
+                    old_value_t = mb_old_values_seq[:, t]
+                    v_loss_unclipped = (new_value_t - return_t) ** 2
+                    v_clipped = old_value_t + torch.clamp(
+                        new_value_t - old_value_t, -self.clip_coef, self.clip_coef
+                    )
+                    v_loss_clipped = (v_clipped - return_t) ** 2
+                    value_loss_total += (
+                        0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+                    )
                     entropy_loss_total += -entropy_t  # entropy_t is already mean
 
                     with torch.no_grad():
