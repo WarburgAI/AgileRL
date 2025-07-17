@@ -2089,12 +2089,16 @@ class ICM_PPO(RLAlgorithm):
         # Flat map them into "actor_*" and "critic_*" (if not sharing encoders)
         flat_hidden = {}
 
-        actor_hidden = self.actor.initialize_hidden_state(batch_size=num_envs)
+        actor_hidden = self.actor.initialize_hidden_state(
+            batch_size=num_envs, device=self.device
+        )
         flat_hidden.update(actor_hidden)
 
         # also add the critic hidden state if not sharing encoders
         if not self.share_encoders:
-            critic_hidden = self.critic.initialize_hidden_state(batch_size=num_envs)
+            critic_hidden = self.critic.initialize_hidden_state(
+                batch_size=num_envs, device=self.device
+            )
             flat_hidden.update(critic_hidden)
 
         return flat_hidden
