@@ -148,63 +148,63 @@ class PPO(RLAlgorithm):
         assert isinstance(gamma, (float, int, torch.Tensor)), "Gamma must be a float."
         assert isinstance(gae_lambda, (float, int)), "Lambda must be a float."
         assert gae_lambda >= 0, "Lambda must be greater than or equal to zero."
-        assert isinstance(
-            action_std_init, (float, int)
-        ), "Action standard deviation must be a float."
-        assert (
-            action_std_init >= 0
-        ), "Action standard deviation must be greater than or equal to zero."
-        assert isinstance(
-            clip_coef, (float, int)
-        ), "Clipping coefficient must be a float."
-        assert (
-            clip_coef >= 0
-        ), "Clipping coefficient must be greater than or equal to zero."
-        assert isinstance(
-            ent_coef, (float, int)
-        ), "Entropy coefficient must be a float."
-        assert (
-            ent_coef >= 0
-        ), "Entropy coefficient must be greater than or equal to zero."
-        assert isinstance(
-            vf_coef, (float, int)
-        ), "Value function coefficient must be a float."
-        assert (
-            vf_coef >= 0
-        ), "Value function coefficient must be greater than or equal to zero."
-        assert isinstance(
-            max_grad_norm, (float, int)
-        ), "Maximum norm for gradient clipping must be a float."
-        assert (
-            max_grad_norm >= 0
-        ), "Maximum norm for gradient clipping must be greater than or equal to zero."
-        assert (
-            isinstance(target_kl, (float, int)) or target_kl is None
-        ), "Target KL divergence threshold must be a float."
+        assert isinstance(action_std_init, (float, int)), (
+            "Action standard deviation must be a float."
+        )
+        assert action_std_init >= 0, (
+            "Action standard deviation must be greater than or equal to zero."
+        )
+        assert isinstance(clip_coef, (float, int)), (
+            "Clipping coefficient must be a float."
+        )
+        assert clip_coef >= 0, (
+            "Clipping coefficient must be greater than or equal to zero."
+        )
+        assert isinstance(ent_coef, (float, int)), (
+            "Entropy coefficient must be a float."
+        )
+        assert ent_coef >= 0, (
+            "Entropy coefficient must be greater than or equal to zero."
+        )
+        assert isinstance(vf_coef, (float, int)), (
+            "Value function coefficient must be a float."
+        )
+        assert vf_coef >= 0, (
+            "Value function coefficient must be greater than or equal to zero."
+        )
+        assert isinstance(max_grad_norm, (float, int)), (
+            "Maximum norm for gradient clipping must be a float."
+        )
+        assert max_grad_norm >= 0, (
+            "Maximum norm for gradient clipping must be greater than or equal to zero."
+        )
+        assert isinstance(target_kl, (float, int)) or target_kl is None, (
+            "Target KL divergence threshold must be a float."
+        )
         if target_kl is not None:
-            assert (
-                target_kl >= 0
-            ), "Target KL divergence threshold must be greater than or equal to zero."
-        assert isinstance(
-            update_epochs, int
-        ), "Policy update epochs must be an integer."
-        assert (
-            update_epochs >= 1
-        ), "Policy update epochs must be greater than or equal to one."
-        assert isinstance(
-            wrap, bool
-        ), "Wrap models flag must be boolean value True or False."
+            assert target_kl >= 0, (
+                "Target KL divergence threshold must be greater than or equal to zero."
+            )
+        assert isinstance(update_epochs, int), (
+            "Policy update epochs must be an integer."
+        )
+        assert update_epochs >= 1, (
+            "Policy update epochs must be greater than or equal to one."
+        )
+        assert isinstance(wrap, bool), (
+            "Wrap models flag must be boolean value True or False."
+        )
 
         # New parameters for using RolloutBuffer
-        assert isinstance(
-            use_rollout_buffer, bool
-        ), "Use rollout buffer flag must be boolean value True or False."
-        assert isinstance(
-            recurrent, bool
-        ), "Has hidden states flag must be boolean value True or False."
-        assert isinstance(
-            bptt_sequence_type, BPTTSequenceType
-        ), "bptt_sequence_type must be a BPTTSequenceType enum value."
+        assert isinstance(use_rollout_buffer, bool), (
+            "Use rollout buffer flag must be boolean value True or False."
+        )
+        assert isinstance(recurrent, bool), (
+            "Has hidden states flag must be boolean value True or False."
+        )
+        assert isinstance(bptt_sequence_type, BPTTSequenceType), (
+            "bptt_sequence_type must be a BPTTSequenceType enum value."
+        )
 
         if not use_rollout_buffer:
             warnings.warn(
@@ -340,7 +340,7 @@ class PPO(RLAlgorithm):
     def create_rollout_buffer(self) -> None:
         """Creates a rollout buffer with the current configuration."""
         self.rollout_buffer = RolloutBuffer(
-            capacity=self.learn_step // self.num_envs,
+            capacity=self.learn_step,
             observation_space=self.observation_space,
             action_space=self.action_space,
             device=self.device,
@@ -496,7 +496,9 @@ class PPO(RLAlgorithm):
 
         # Get values from actor-critic
         _, _, entropy, values, _ = self._get_action_and_values(
-            obs, hidden_state=eval_hidden_state, sample=False  # No need to sample here
+            obs,
+            hidden_state=eval_hidden_state,
+            sample=False,  # No need to sample here
         )
 
         log_prob = self.actor.action_log_prob(actions)
@@ -680,9 +682,9 @@ class PPO(RLAlgorithm):
                             :, finished_mask, :
                         ]
                         if reset_states_for_key.shape[1] > 0:
-                            self.hidden_state[key][
-                                :, finished_mask, :
-                            ] = reset_states_for_key
+                            self.hidden_state[key][:, finished_mask, :] = (
+                                reset_states_for_key
+                            )
 
             if self.recurrent:
                 current_hidden_state_for_actor = (
@@ -1548,9 +1550,9 @@ class PPO(RLAlgorithm):
                                     :, newly_finished, :
                                 ]
                                 if reset_states.shape[1] > 0:
-                                    test_hidden_state[key][
-                                        :, newly_finished, :
-                                    ] = reset_states
+                                    test_hidden_state[key][:, newly_finished, :] = (
+                                        reset_states
+                                    )
 
                     if np.any(newly_finished):
                         completed_episode_scores[newly_finished] = scores[
