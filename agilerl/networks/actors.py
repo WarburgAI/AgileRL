@@ -334,8 +334,34 @@ class StochasticActor(EvolvableNetwork):
             0.5 * (action + 1.0) * (self.action_high - self.action_low)
         )
 
+    def forward_head(
+        self,
+        latent: torch.Tensor,
+        action_mask: Optional[ArrayOrTensor] = None,
+        sample: bool = True,
+        deterministic: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Forward pass of the network head.
+
+        :param latent: Latent space representation.
+        :type latent: torch.Tensor
+        :param action_mask: Action mask.
+        :type action_mask: Optional[ArrayOrTensor]
+        :param sample: Whether to sample an action from the distribution. Defaults to True.
+        :type sample: bool, optional
+        :param deterministic: Whether to return a deterministic action. Defaults to False.
+        :type deterministic: bool, optional
+        :return: Action, log probability of the action, and entropy of the distribution.
+        :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        """
+        return self.head_net.forward(
+            latent, action_mask, sample=sample, deterministic=deterministic
+        )
+
     def forward(
-        self, obs: TorchObsType, action_mask: Optional[ArrayOrTensor] = None
+        self,
+        obs: TorchObsType,
+        action_mask: Optional[ArrayOrTensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass of the network.
 
@@ -347,7 +373,7 @@ class StochasticActor(EvolvableNetwork):
         :rtype: Tuple[torch.Tensor, torch.Tensor]
         """
         latent = self.extract_features(obs)
-        action, log_prob, entropy = self.head_net.forward(latent, action_mask)
+        action, log_prob, entropy = self.forward_head(latent, action_mask)
 
         # Action scaling only relevant for continuous action spaces with squashing
         if isinstance(self.action_space, spaces.Box) and self.squash_output:

@@ -646,7 +646,8 @@ class ICM_PPO(RLAlgorithm):
         action_mask: Optional[ArrayOrTensor] = None,
         hidden_state: Optional[ArrayOrTensor] = None,
         *,  # keyword-only
-        sample: bool = True,  # NEW flag
+        sample: bool = True,
+        deterministic: bool = False,
     ) -> Tuple[
         ArrayOrTensor,
         torch.Tensor,
@@ -664,14 +665,20 @@ class ICM_PPO(RLAlgorithm):
         :type action_mask: numpy.ndarray, optional
         :param hidden_state: Hidden state for recurrent policies, defaults to None
         :type hidden_state: numpy.ndarray, optional
-        :param sample: Whether to sample an action or return the mode/mean. Defaults to True.
+        :param sample: Whether to sample an action, defaults to True.
         :type sample: bool
+        :param deterministic: Whether to return a deterministic action. Defaults to False.
+        :type deterministic: bool, optional
         :return: Action, log probability, entropy, state values, and next hidden state
         :rtype: Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[ArrayOrTensor], Optional[ArrayOrTensor]]
         """
         if not self.use_shared_encoder_for_icm:
             return self._get_action_and_values_icm(
-                obs, action_mask, hidden_state, sample=sample
+                obs,
+                action_mask,
+                hidden_state,
+                sample=sample,
+                deterministic=deterministic,
             )
 
         if hidden_state is not None:
@@ -680,7 +687,10 @@ class ICM_PPO(RLAlgorithm):
             )
 
             action, log_prob, entropy = self.actor.forward_head(
-                latent_pi, action_mask=action_mask, sample=sample
+                latent_pi,
+                action_mask=action_mask,
+                sample=sample,
+                deterministic=deterministic,
             )
 
             if self.share_encoders:
@@ -693,7 +703,10 @@ class ICM_PPO(RLAlgorithm):
         else:
             latent_pi = self.actor.extract_features(obs)
             action, log_prob, entropy = self.actor.forward_head(
-                latent_pi, action_mask=action_mask, sample=sample
+                latent_pi,
+                action_mask=action_mask,
+                sample=sample,
+                deterministic=deterministic,
             )
             values = (
                 self.critic.forward_head(latent_pi).squeeze(-1)
@@ -940,16 +953,25 @@ class ICM_PPO(RLAlgorithm):
         obs: ArrayOrTensor,
         action_mask: Optional[ArrayOrTensor] = None,
         hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
+        deterministic: bool = False,
     ) -> Union[
         Tuple[
-            ArrayOrTensor,
-            torch.Tensor,
-            torch.Tensor,
-            torch.Tensor,
+            np.ndarray,
+            np.ndarray,
+            np.ndarray,
+            np.ndarray,
             Optional[Dict[str, ArrayOrTensor]],
-            ArrayOrTensor,
+            np.ndarray,
         ],
-        Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, ArrayOrTensor],
+        Tuple[
+            np.ndarray,
+            np.ndarray,
+            np.ndarray,
+            np.ndarray,
+            Optional[Dict[str, ArrayOrTensor]],
+        ],
+        Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+        Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
     ]:
         """Returns the next action to take in the environment.
 
@@ -959,23 +981,38 @@ class ICM_PPO(RLAlgorithm):
         :type action_mask: numpy.ndarray, optional
         :param hidden_state: Hidden state for recurrent policies, defaults to None
         :type hidden_state: numpy.ndarray, optional
+        :param deterministic: Boolean specifying whether to desired action is stochastic or deterministic, defaults to False
+        :type deterministic: bool, optional
         :return: Action, log probability, entropy, state values, and next hidden state
         :rtype: Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[ArrayOrTensor]]
         """
-        if not self.use_shared_encoder_for_icm:
-            # return super().get_action(obs, action_mask, hidden_state)
-            return self._get_action_and_values_icm(obs, action_mask, hidden_state)
-
         obs = self.preprocess_observation(obs)
         with torch.no_grad():
-            if self.recurrent and hidden_state is not None:
+            if self.use_shared_encoder_for_icm:
                 action, log_prob, entropy, values, next_hidden, latent_pi = (
-                    self._get_action_and_values(obs, action_mask, hidden_state)
+                    self._get_action_and_values(
+                        obs,
+                        action_mask,
+                        hidden_state,
+                        sample=not deterministic,
+                        deterministic=deterministic,
+                    )
                 )
-            else:
-                action, log_prob, entropy, values, next_hidden, latent_pi = (
-                    self._get_action_and_values(obs, action_mask)
+            else:  # Not using shared encoder
+                (
+                    action,
+                    log_prob,
+                    entropy,
+                    values,
+                    next_hidden,
+                ) = self._get_action_and_values_icm(
+                    obs,
+                    action_mask,
+                    hidden_state,
+                    sample=not deterministic,
+                    deterministic=deterministic,
                 )
+                latent_pi = None
 
         # Use -log_prob as entropy when squashing output in continuous action spaces
         entropy = -log_prob.mean() if entropy is None else entropy
@@ -986,30 +1023,46 @@ class ICM_PPO(RLAlgorithm):
             action = action.unsqueeze(1)
 
         # Clip to action space during inference
-        action = action.cpu().data.numpy()
+        action_np = action.cpu().data.numpy()
         if not self.training and isinstance(self.action_space, spaces.Box):
             if self.actor.squash_output:
-                action = self.actor.scale_action(action)
+                action_np = self.actor.scale_action(action_np)
             else:
-                action = np.clip(action, self.action_space.low, self.action_space.high)
+                action_np = np.clip(
+                    action_np, self.action_space.low, self.action_space.high
+                )
 
-        if self.recurrent:
-            return (
-                action,
-                log_prob.cpu().data.numpy(),
-                entropy.cpu().data.numpy(),
-                values.cpu().data.numpy(),
-                next_hidden if next_hidden is not None else None,
-                latent_pi.cpu().data.numpy(),
-            )
-        else:
-            return (
-                action,
-                log_prob.cpu().data.numpy(),
-                entropy.cpu().data.numpy(),
-                values.cpu().data.numpy(),
-                latent_pi.cpu().data.numpy(),
-            )
+        log_prob_np = log_prob.cpu().data.numpy() if log_prob is not None else None
+        entropy_np = entropy.cpu().data.numpy()
+        values_np = values.cpu().data.numpy()
+
+        if self.use_shared_encoder_for_icm:
+            latent_pi_np = latent_pi.cpu().data.numpy()
+            if self.recurrent:
+                return (
+                    action_np,
+                    log_prob_np,
+                    entropy_np,
+                    values_np,
+                    next_hidden,
+                    latent_pi_np,
+                )
+            else:
+                # latent_pi is returned, next_hidden is None
+                return (
+                    action_np,
+                    log_prob_np,
+                    entropy_np,
+                    values_np,
+                    next_hidden,
+                    latent_pi_np,
+                )
+        else:  # not using shared encoder
+            if self.recurrent:
+                return action_np, log_prob_np, entropy_np, values_np, next_hidden
+            else:
+                # next_hidden is None
+                return action_np, log_prob_np, entropy_np, values_np, next_hidden
 
     def learn(
         self, experiences: Union[ExperiencesType, None] = None
@@ -2049,9 +2102,10 @@ class ICM_PPO(RLAlgorithm):
         max_steps: Optional[int] = None,
         loop: int = 3,
         vectorized: bool = True,
+        deterministic: bool = True,
         callback: Optional[Callable[[float, Dict[str, float]], None]] = None,
     ) -> float:
-        """Returns mean test score of agent in environment with epsilon-greedy policy.
+        """Returns mean test score of agent in environment.
 
         :param env: The environment to be tested in
         :type env: GymEnvType
@@ -2063,6 +2117,8 @@ class ICM_PPO(RLAlgorithm):
         :type loop: int, optional
         :param vectorized: Whether the environment is vectorized, defaults to True
         :type vectorized: bool, optional
+        :param deterministic: Boolean specifying whether to desired action is stochastic or deterministic, defaults to True
+        :type deterministic: bool, optional
         :param callback: Optional callback function that takes the sum of rewards and the last info dictionary as input, defaults to None
         :type callback: Optional[Callable[[float, Dict[str, float]], None]]
 
@@ -2130,14 +2186,19 @@ class ICM_PPO(RLAlgorithm):
                     # Get action
                     if self.recurrent:
                         returned_tuple = self.get_action(
-                            obs, action_mask=action_mask, hidden_state=test_hidden_state
+                            obs,
+                            action_mask=action_mask,
+                            hidden_state=test_hidden_state,
+                            deterministic=deterministic,
                         )
                         if self.use_shared_encoder_for_icm:
                             action, _, _, _, test_hidden_state, _ = returned_tuple
                         else:
                             action, _, _, _, test_hidden_state = returned_tuple
                     else:
-                        returned_tuple = self.get_action(obs, action_mask=action_mask)
+                        returned_tuple = self.get_action(
+                            obs, action_mask=action_mask, deterministic=deterministic
+                        )
                         if self.use_shared_encoder_for_icm:
                             action, _, _, _, _, _ = returned_tuple
                         else:
@@ -2282,6 +2343,7 @@ class ICM_PPO(RLAlgorithm):
         ] = None,  # Hidden state is a dict for recurrent policies
         *,
         sample: bool = True,
+        deterministic: bool = False,
     ) -> Tuple[
         ArrayOrTensor,
         torch.Tensor,
@@ -2300,6 +2362,8 @@ class ICM_PPO(RLAlgorithm):
         :type hidden_state: Optional[Dict[str, ArrayOrTensor]]
         :param sample: Whether to sample an action, defaults to True
         :type sample: bool
+        :param deterministic: Whether to return a deterministic action. Defaults to False.
+        :type deterministic: bool, optional
         :return: Action, log probability, entropy, state values, and (if recurrent) next hidden state
         :rtype: Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[Dict[str, ArrayOrTensor]]]
         """
@@ -2308,7 +2372,10 @@ class ICM_PPO(RLAlgorithm):
                 obs, hidden_state=hidden_state
             )
             action, log_prob, entropy = self.actor.forward_head(
-                latent_pi, action_mask=action_mask, sample=sample
+                latent_pi,
+                action_mask=action_mask,
+                sample=sample,
+                deterministic=deterministic,
             )
 
             next_hidden_combined = (
@@ -2332,7 +2399,10 @@ class ICM_PPO(RLAlgorithm):
         else:
             latent_pi = self.actor.extract_features(obs)
             action, log_prob, entropy = self.actor.forward_head(
-                latent_pi, action_mask=action_mask, sample=sample
+                latent_pi,
+                action_mask=action_mask,
+                sample=sample,
+                deterministic=deterministic,
             )
             values = (
                 self.critic.forward_head(latent_pi).squeeze(-1)

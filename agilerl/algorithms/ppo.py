@@ -365,6 +365,7 @@ class PPO(RLAlgorithm):
         ] = None,  # Hidden state is a dict for recurrent policies
         *,
         sample: bool = True,
+        deterministic: bool = False,
     ) -> Tuple[
         ArrayOrTensor,
         torch.Tensor,
@@ -383,6 +384,8 @@ class PPO(RLAlgorithm):
         :type hidden_state: Optional[Dict[str, ArrayOrTensor]]
         :param sample: Whether to sample an action, defaults to True
         :type sample: bool
+        :param deterministic: Whether to return a deterministic action, defaults to False
+        :type deterministic: bool, optional
         :return: Action, log probability, entropy, state values, and (if recurrent) next hidden state
         :rtype: Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[Dict[str, ArrayOrTensor]]]
         """
@@ -391,7 +394,10 @@ class PPO(RLAlgorithm):
                 obs, hidden_state=hidden_state
             )
             action, log_prob, entropy = self.actor.forward_head(
-                latent_pi, action_mask=action_mask, sample=sample
+                latent_pi,
+                action_mask=action_mask,
+                sample=sample,
+                deterministic=deterministic,
             )
 
             next_hidden_combined = (
@@ -415,7 +421,10 @@ class PPO(RLAlgorithm):
         else:
             latent_pi = self.actor.extract_features(obs)
             action, log_prob, entropy = self.actor.forward_head(
-                latent_pi, action_mask=action_mask, sample=sample
+                latent_pi,
+                action_mask=action_mask,
+                sample=sample,
+                deterministic=deterministic,
             )
             values = (
                 self.critic.forward_head(latent_pi).squeeze(-1)
@@ -514,6 +523,7 @@ class PPO(RLAlgorithm):
         obs: ArrayOrTensor,
         action_mask: Optional[ArrayOrTensor] = None,
         hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
+        deterministic: bool = False,
     ) -> Union[
         Tuple[
             np.ndarray,  # action
@@ -532,6 +542,8 @@ class PPO(RLAlgorithm):
         :type action_mask: Optional[ArrayOrTensor]
         :param hidden_state: Hidden state for recurrent policies, defaults to None
         :type hidden_state: Optional[Dict[str, ArrayOrTensor]]
+        :param deterministic: Boolean specifying whether to desired action is stochastic or deterministic, defaults to False
+        :type deterministic: bool, optional
         :return: Action, log probability, entropy, state values, and (if recurrent) next hidden state
         :rtype: Union[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Optional[Dict[str, ArrayOrTensor]]], Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]
         """
@@ -542,7 +554,8 @@ class PPO(RLAlgorithm):
                     obs,
                     action_mask,
                     hidden_state,
-                    sample=True,  # Explicitly sample=True during get_action
+                    sample=not deterministic,
+                    deterministic=deterministic,
                 )
             )
 
@@ -1197,6 +1210,7 @@ class PPO(RLAlgorithm):
         sequences_per_minibatch = (
             self.batch_size
         )  # Here, batch_size means number of sequences per minibatch
+
         total_loss_sum = 0.0
         policy_loss_sum = 0.0
         value_loss_sum = 0.0
@@ -1431,9 +1445,10 @@ class PPO(RLAlgorithm):
         max_steps: Optional[int] = None,
         loop: int = 3,
         vectorized: bool = True,
+        deterministic: bool = True,
         callback: Optional[Callable[[float, Dict[str, float]], None]] = None,
     ) -> float:
-        """Returns mean test score of agent in environment with epsilon-greedy policy.
+        """Returns mean test score of agent in environment.
 
         :param env: The environment to be tested in
         :type env: GymEnvType
@@ -1445,6 +1460,8 @@ class PPO(RLAlgorithm):
         :type loop: int, optional
         :param vectorized: Whether the environment is vectorized, defaults to True
         :type vectorized: bool, optional
+        :param deterministic: Boolean specifying whether to desired action is stochastic or deterministic, defaults to True
+        :type deterministic: bool, optional
         :param callback: Optional callback function that takes the sum of rewards and the last info dictionary as input, defaults to None
         :type callback: Optional[Callable[[float, Dict[str, float]], None]]
 
@@ -1512,10 +1529,15 @@ class PPO(RLAlgorithm):
                     # Get action
                     if self.recurrent:
                         action, _, _, _, test_hidden_state = self.get_action(
-                            obs, action_mask=action_mask, hidden_state=test_hidden_state
+                            obs,
+                            action_mask=action_mask,
+                            hidden_state=test_hidden_state,
+                            deterministic=deterministic,
                         )
                     else:
-                        action, _, _, _ = self.get_action(obs, action_mask=action_mask)
+                        action, _, _, _ = self.get_action(
+                            obs, action_mask=action_mask, deterministic=deterministic
+                        )
 
                     # Environment step
                     if vectorized:

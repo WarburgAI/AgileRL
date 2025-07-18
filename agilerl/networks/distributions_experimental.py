@@ -125,7 +125,7 @@ class TorchDistribution:
             else:
                 raise ValueError(
                     f"Action tensor ndim {action.ndim} is not compatible with Discrete space logits ndim {log_p_all.ndim}. "
-                    f"Expected action ndim to be {log_p_all.ndim-1} or {log_p_all.ndim}."
+                    f"Expected action ndim to be {log_p_all.ndim - 1} or {log_p_all.ndim}."
                 )
 
             return log_p_all.gather(-1, action_indices_for_gather).squeeze(-1)
@@ -165,6 +165,35 @@ class TorchDistribution:
             return (a * log_p1 + (1.0 - a) * log_p0).sum(-1)
 
         raise NotImplementedError
+
+    def mode(self) -> torch.Tensor:
+        if isinstance(self.action_space, spaces.Discrete):
+            return torch.argmax(self.logits, dim=-1)
+
+        if isinstance(self.action_space, spaces.Box):
+            action = self.mu
+            if self.squash_output:
+                action = torch.tanh(action)
+            return action
+
+        # -------- MultiDiscrete --------
+        if isinstance(self.action_space, spaces.MultiDiscrete):
+            modes = []
+            offset = 0
+            for size in self.action_space.nvec:
+                logits_i = self.logits[:, offset : offset + size]
+                mode_i = torch.argmax(logits_i, dim=-1)
+                modes.append(mode_i)
+                offset += size
+            return torch.stack(modes, dim=-1)
+
+        # -------- MultiBinary --------
+        if isinstance(self.action_space, spaces.MultiBinary):
+            return (self.logits > 0).float()
+
+        raise NotImplementedError(
+            "Mode not implemented for this action space in fast path."
+        )
 
     def entropy(self) -> torch.Tensor:
         if isinstance(self.action_space, spaces.Discrete):
@@ -384,6 +413,7 @@ class EvolvableDistribution(EvolvableWrapper):
         latent: torch.Tensor,
         action_mask: Optional[ArrayOrTensor] = None,
         sample: bool = True,
+        deterministic: bool = False,
     ) -> Union[
         Tuple[torch.Tensor, torch.Tensor, torch.Tensor], Tuple[None, None, torch.Tensor]
     ]:
@@ -395,6 +425,8 @@ class EvolvableDistribution(EvolvableWrapper):
         :type action_mask: Optional[ArrayOrTensor]
         :param sample: Whether to sample an action or return the mode/mean. Defaults to True.
         :type sample: bool
+        :param deterministic: Whether to return a deterministic action. Overrides sample flag. Defaults to False.
+        :type deterministic: bool, optional
         :return: Action and log probability of the action.
         :rtype: Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], Tuple[None, torch.Tensor, torch.Tensor]]
         """
@@ -427,15 +459,16 @@ class EvolvableDistribution(EvolvableWrapper):
         # get_distribution now creates the new TorchDistribution object
         self.dist = self.get_distribution(logits)
 
-        # Sample action, compute log probability and entropy
-        if sample:
+        action = None
+        log_prob = None
+
+        if deterministic:
+            action = self.dist.mode()
+        elif sample:
             action = self.dist.sample()
             log_prob = self.dist.log_prob(action)
-        else:
-            action = None  # Mode/mean might be more appropriate if not sampling
-            log_prob = (
-                None  # Log prob of mode/mean typically not used in PPO sample step
-            )
+        else:  # Not deterministic, not sample -> return mode
+            action = self.dist.mode()
 
         entropy = self.dist.entropy()
         return action, log_prob, entropy
