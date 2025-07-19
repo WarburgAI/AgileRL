@@ -1,4 +1,5 @@
 import copy
+import time
 import warnings
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
@@ -148,63 +149,63 @@ class PPO(RLAlgorithm):
         assert isinstance(gamma, (float, int, torch.Tensor)), "Gamma must be a float."
         assert isinstance(gae_lambda, (float, int)), "Lambda must be a float."
         assert gae_lambda >= 0, "Lambda must be greater than or equal to zero."
-        assert isinstance(action_std_init, (float, int)), (
-            "Action standard deviation must be a float."
-        )
-        assert action_std_init >= 0, (
-            "Action standard deviation must be greater than or equal to zero."
-        )
-        assert isinstance(clip_coef, (float, int)), (
-            "Clipping coefficient must be a float."
-        )
-        assert clip_coef >= 0, (
-            "Clipping coefficient must be greater than or equal to zero."
-        )
-        assert isinstance(ent_coef, (float, int)), (
-            "Entropy coefficient must be a float."
-        )
-        assert ent_coef >= 0, (
-            "Entropy coefficient must be greater than or equal to zero."
-        )
-        assert isinstance(vf_coef, (float, int)), (
-            "Value function coefficient must be a float."
-        )
-        assert vf_coef >= 0, (
-            "Value function coefficient must be greater than or equal to zero."
-        )
-        assert isinstance(max_grad_norm, (float, int)), (
-            "Maximum norm for gradient clipping must be a float."
-        )
-        assert max_grad_norm >= 0, (
-            "Maximum norm for gradient clipping must be greater than or equal to zero."
-        )
-        assert isinstance(target_kl, (float, int)) or target_kl is None, (
-            "Target KL divergence threshold must be a float."
-        )
+        assert isinstance(
+            action_std_init, (float, int)
+        ), "Action standard deviation must be a float."
+        assert (
+            action_std_init >= 0
+        ), "Action standard deviation must be greater than or equal to zero."
+        assert isinstance(
+            clip_coef, (float, int)
+        ), "Clipping coefficient must be a float."
+        assert (
+            clip_coef >= 0
+        ), "Clipping coefficient must be greater than or equal to zero."
+        assert isinstance(
+            ent_coef, (float, int)
+        ), "Entropy coefficient must be a float."
+        assert (
+            ent_coef >= 0
+        ), "Entropy coefficient must be greater than or equal to zero."
+        assert isinstance(
+            vf_coef, (float, int)
+        ), "Value function coefficient must be a float."
+        assert (
+            vf_coef >= 0
+        ), "Value function coefficient must be greater than or equal to zero."
+        assert isinstance(
+            max_grad_norm, (float, int)
+        ), "Maximum norm for gradient clipping must be a float."
+        assert (
+            max_grad_norm >= 0
+        ), "Maximum norm for gradient clipping must be greater than or equal to zero."
+        assert (
+            isinstance(target_kl, (float, int)) or target_kl is None
+        ), "Target KL divergence threshold must be a float."
         if target_kl is not None:
-            assert target_kl >= 0, (
-                "Target KL divergence threshold must be greater than or equal to zero."
-            )
-        assert isinstance(update_epochs, int), (
-            "Policy update epochs must be an integer."
-        )
-        assert update_epochs >= 1, (
-            "Policy update epochs must be greater than or equal to one."
-        )
-        assert isinstance(wrap, bool), (
-            "Wrap models flag must be boolean value True or False."
-        )
+            assert (
+                target_kl >= 0
+            ), "Target KL divergence threshold must be greater than or equal to zero."
+        assert isinstance(
+            update_epochs, int
+        ), "Policy update epochs must be an integer."
+        assert (
+            update_epochs >= 1
+        ), "Policy update epochs must be greater than or equal to one."
+        assert isinstance(
+            wrap, bool
+        ), "Wrap models flag must be boolean value True or False."
 
         # New parameters for using RolloutBuffer
-        assert isinstance(use_rollout_buffer, bool), (
-            "Use rollout buffer flag must be boolean value True or False."
-        )
-        assert isinstance(recurrent, bool), (
-            "Has hidden states flag must be boolean value True or False."
-        )
-        assert isinstance(bptt_sequence_type, BPTTSequenceType), (
-            "bptt_sequence_type must be a BPTTSequenceType enum value."
-        )
+        assert isinstance(
+            use_rollout_buffer, bool
+        ), "Use rollout buffer flag must be boolean value True or False."
+        assert isinstance(
+            recurrent, bool
+        ), "Has hidden states flag must be boolean value True or False."
+        assert isinstance(
+            bptt_sequence_type, BPTTSequenceType
+        ), "bptt_sequence_type must be a BPTTSequenceType enum value."
 
         if not use_rollout_buffer:
             warnings.warn(
@@ -327,6 +328,11 @@ class PPO(RLAlgorithm):
         self.register_network_group(NetworkGroup(eval=self.critic))
 
         self.hidden_state = None
+        self.total_learn_time = 0.0
+        self.total_collection_time = 0.0
+        self.last_collection_time = 0.0
+        self.last_learn_time = 0.0
+        self.last_learn_time_metrics = {}
 
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critic."""
@@ -619,6 +625,7 @@ class PPO(RLAlgorithm):
             )
 
         n_steps = n_steps or self.learn_step
+        start_time = time.time()
 
         if reset_on_collect:
             # Initial reset
@@ -695,9 +702,9 @@ class PPO(RLAlgorithm):
                             :, finished_mask, :
                         ]
                         if reset_states_for_key.shape[1] > 0:
-                            self.hidden_state[key][:, finished_mask, :] = (
-                                reset_states_for_key
-                            )
+                            self.hidden_state[key][
+                                :, finished_mask, :
+                            ] = reset_states_for_key
 
             if self.recurrent:
                 current_hidden_state_for_actor = (
@@ -726,6 +733,9 @@ class PPO(RLAlgorithm):
         self.rollout_buffer.compute_returns_and_advantages(
             last_value=last_value, last_done=last_done
         )
+        end_time = time.time()
+        self.last_collection_time = end_time - start_time
+        self.total_collection_time += self.last_collection_time
 
     def learn(self, experiences: Optional[ExperiencesType] = None) -> Dict[str, float]:
         """Updates agent network parameters to learn from experiences.
@@ -736,6 +746,8 @@ class PPO(RLAlgorithm):
         :return: Dictionary of metrics including total_loss, policy_loss, value_loss, entropy_loss, approx_kl, and clip_fraction.
         :rtype: Dict[str, float]
         """
+        self.last_learn_time_metrics.clear()
+        start_time = time.time()
         if self.use_rollout_buffer:
             # NOTE: we are still allowing experiences to be passed in for backwards compatibility
             # but we will remove this in a future releases.
@@ -748,10 +760,26 @@ class PPO(RLAlgorithm):
                     and self.max_seq_len is not None
                     and self.max_seq_len > 0
                 ):
-                    return self._learn_from_rollout_buffer_bptt()
+                    metrics = self._learn_from_rollout_buffer_bptt()
                 else:
-                    return self._learn_from_rollout_buffer_flat()
-        return self._deprecated_learn_from_experiences(experiences)
+                    metrics = self._learn_from_rollout_buffer_flat()
+        else:
+            metrics = self._deprecated_learn_from_experiences(experiences)
+
+        end_time = time.time()
+        self.last_learn_time = end_time - start_time
+        self.total_learn_time += self.last_learn_time
+
+        metrics.update(
+            {
+                "last_learn_time": self.last_learn_time,
+                "total_learn_time": self.total_learn_time,
+                "last_collection_time": self.last_collection_time,
+                "total_collection_time": self.total_collection_time,
+                **self.last_learn_time_metrics,
+            }
+        )
+        return metrics
 
     def _deprecated_learn_from_experiences(
         self, experiences: ExperiencesType
@@ -781,6 +809,7 @@ class PPO(RLAlgorithm):
         # Bootstrapping returns using GAE advantage estimation
         dones = dones.long()
         with torch.no_grad():
+            t_start_gae = time.time()
             num_steps = rewards.size(0)
             next_state = self.preprocess_observation(next_state)
             next_value = self.critic(next_state).reshape(1, -1).cpu()
@@ -804,6 +833,10 @@ class PPO(RLAlgorithm):
                     delta
                     + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lambda
                 )
+            t_end_gae = time.time()
+            self.last_learn_time_metrics["gae_calculation_time"] = (
+                t_end_gae - t_start_gae
+            )
 
             returns = advantages + values
 
@@ -846,8 +879,14 @@ class PPO(RLAlgorithm):
                 batch_values = batch_values.squeeze()
 
                 if len(minibatch_idxs) > 1:
+                    t_start_forward = time.time()
                     log_prob, entropy, value = self.evaluate_actions(
                         obs=batch_states, actions=batch_actions
+                    )
+                    t_end_forward = time.time()
+                    self.last_learn_time_metrics["forward_pass_time"] = (
+                        self.last_learn_time_metrics.get("forward_pass_time", 0.0)
+                        + (t_end_forward - t_start_forward)
                     )
 
                     logratio = log_prob - batch_log_probs
@@ -862,6 +901,7 @@ class PPO(RLAlgorithm):
                     )
 
                     # Policy loss
+                    t_start_loss = time.time()
                     pg_loss1 = -minibatch_advs * ratio
                     pg_loss2 = -minibatch_advs * torch.clamp(
                         ratio, 1 - self.clip_coef, 1 + self.clip_coef
@@ -883,8 +923,14 @@ class PPO(RLAlgorithm):
                     loss = (
                         pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
                     )
+                    t_end_loss = time.time()
+                    self.last_learn_time_metrics["loss_calculation_time"] = (
+                        self.last_learn_time_metrics.get("loss_calculation_time", 0.0)
+                        + (t_end_loss - t_start_loss)
+                    )
 
                     # actor + critic loss backprop
+                    t_start_backward = time.time()
                     self.optimizer.zero_grad()
                     if self.accelerator is not None:
                         self.accelerator.backward(loss)
@@ -896,6 +942,11 @@ class PPO(RLAlgorithm):
                     clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
 
                     self.optimizer.step()
+                    t_end_backward = time.time()
+                    self.last_learn_time_metrics["backward_pass_time"] = (
+                        self.last_learn_time_metrics.get("backward_pass_time", 0.0)
+                        + (t_end_backward - t_start_backward)
+                    )
 
                     total_loss_sum += loss.item()
                     policy_loss_sum += pg_loss.item()
@@ -942,7 +993,12 @@ class PPO(RLAlgorithm):
             buffer_td = buffer_td_external
         else:
             # .get_tensor_batch() returns a TensorDict on the specified device
+            t_start_get_batch = time.time()
             buffer_td = self.rollout_buffer.get_tensor_batch(device=self.device)
+            t_end_get_batch = time.time()
+            self.last_learn_time_metrics["get_tensor_batch_time"] = (
+                t_end_get_batch - t_start_get_batch
+            )
 
         if buffer_td.is_empty():
             warnings.warn("Buffer data is empty. Skipping learning step.")
@@ -959,7 +1015,12 @@ class PPO(RLAlgorithm):
         advantages = buffer_td["advantages"]
 
         # Normalize advantages
+        t_start_adv_norm = time.time()
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        t_end_adv_norm = time.time()
+        self.last_learn_time_metrics["advantage_normalization_time"] = (
+            t_end_adv_norm - t_start_adv_norm
+        )
 
         batch_size = self.batch_size
         num_samples = observations.size(0)  # Total number of samples in the buffer
@@ -1010,7 +1071,7 @@ class PPO(RLAlgorithm):
                         warnings.warn(
                             "Recurrent policy, but no hidden_states found in minibatch_td for flat learning."
                         )
-
+                t_start_forward = time.time()
                 _, _, entropy_t, new_value_t, _ = self._get_action_and_values(
                     mb_obs,
                     hidden_state=eval_hidden_state,
@@ -1018,10 +1079,16 @@ class PPO(RLAlgorithm):
                 )
 
                 new_log_prob_t = self.actor.action_log_prob(mb_actions)
+                t_end_forward = time.time()
+                self.last_learn_time_metrics["forward_pass_time"] = (
+                    self.last_learn_time_metrics.get("forward_pass_time", 0.0)
+                    + (t_end_forward - t_start_forward)
+                )
 
                 if entropy_t is None:  # For continuous squashed actions
                     entropy_t = -new_log_prob_t
 
+                t_start_loss = time.time()
                 ratio = torch.exp(new_log_prob_t - mb_old_log_probs)
                 policy_loss1 = -mb_advantages * ratio
                 policy_loss2 = -mb_advantages * torch.clamp(
@@ -1044,6 +1111,11 @@ class PPO(RLAlgorithm):
                     + self.vf_coef * value_loss
                     + self.ent_coef * entropy_loss
                 )
+                t_end_loss = time.time()
+                self.last_learn_time_metrics["loss_calculation_time"] = (
+                    self.last_learn_time_metrics.get("loss_calculation_time", 0.0)
+                    + (t_end_loss - t_start_loss)
+                )
 
                 with torch.no_grad():
                     log_ratio = new_log_prob_t - mb_old_log_probs
@@ -1054,11 +1126,17 @@ class PPO(RLAlgorithm):
                     ).item()
                     clipfrac_sum += clipfrac
 
+                t_start_backward = time.time()
                 self.optimizer.zero_grad()
                 loss.backward()
                 clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                 clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
                 self.optimizer.step()
+                t_end_backward = time.time()
+                self.last_learn_time_metrics["backward_pass_time"] = (
+                    self.last_learn_time_metrics.get("backward_pass_time", 0.0)
+                    + (t_end_backward - t_start_backward)
+                )
 
                 total_loss_sum += loss.item()
                 policy_loss_sum += policy_loss.item()
@@ -1118,6 +1196,7 @@ class PPO(RLAlgorithm):
             }
 
         # Normalize advantages globally once before epochs
+        t_start_adv_norm = time.time()
         valid_advantages_tensor = self.rollout_buffer.buffer["advantages"][
             :buffer_actual_size
         ]
@@ -1130,6 +1209,10 @@ class PPO(RLAlgorithm):
             )
         else:
             warnings.warn("No advantages to normalize in BPTT pre-normalization step.")
+        t_end_adv_norm = time.time()
+        self.last_learn_time_metrics["advantage_normalization_time"] = (
+            t_end_adv_norm - t_start_adv_norm
+        )
 
         # Determine all possible start coordinates for sequences
         num_possible_starts_per_env = buffer_actual_size - seq_len + 1
@@ -1234,12 +1317,18 @@ class PPO(RLAlgorithm):
                 # Fetch minibatch of sequences; returns TensorDict on self.device
                 # Batch_size: [len(current_coords_minibatch), seq_len]
                 # "initial_hidden_states" is a non-tensor entry in TD: Dict[str, Tensor(batch_seq_size, layers, size)]
+                t_start_get_batch = time.time()
                 current_minibatch_td = (
                     self.rollout_buffer.get_specific_sequences_tensor_batch(
                         seq_len=seq_len,
                         sequence_coords=current_coords_minibatch,
                         device=self.device,
                     )
+                )
+                t_end_get_batch = time.time()
+                self.last_learn_time_metrics["get_sequences_batch_time"] = (
+                    self.last_learn_time_metrics.get("get_sequences_batch_time", 0.0)
+                    + (t_end_get_batch - t_start_get_batch)
                 )
 
                 if (
@@ -1288,6 +1377,7 @@ class PPO(RLAlgorithm):
                         for key, val in mb_initial_hidden_states_dict.items()
                     }
 
+                t_start_forward = time.time()
                 for t in range(seq_len):
                     obs_t = (
                         mb_obs_seq[:, t]
@@ -1352,17 +1442,35 @@ class PPO(RLAlgorithm):
                             next_hidden_state_for_actor_step
                         )
 
+                t_end_forward = time.time()
+                self.last_learn_time_metrics["bptt_forward_pass_time"] = (
+                    self.last_learn_time_metrics.get("bptt_forward_pass_time", 0.0)
+                    + (t_end_forward - t_start_forward)
+                )
+
+                t_start_loss = time.time()
                 loss = (
                     policy_loss_total / seq_len
                     + self.vf_coef * (value_loss_total / seq_len)
                     + self.ent_coef * (entropy_loss_total / seq_len)
                 )
+                t_end_loss = time.time()
+                self.last_learn_time_metrics["bptt_loss_calculation_time"] = (
+                    self.last_learn_time_metrics.get("bptt_loss_calculation_time", 0.0)
+                    + (t_end_loss - t_start_loss)
+                )
 
+                t_start_backward = time.time()
                 self.optimizer.zero_grad()
                 loss.backward()
                 clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                 clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
                 self.optimizer.step()
+                t_end_backward = time.time()
+                self.last_learn_time_metrics["bptt_backward_pass_time"] = (
+                    self.last_learn_time_metrics.get("bptt_backward_pass_time", 0.0)
+                    + (t_end_backward - t_start_backward)
+                )
 
                 total_loss_sum += loss.item()
                 policy_loss_sum += policy_loss_total.item() / seq_len
@@ -1572,9 +1680,9 @@ class PPO(RLAlgorithm):
                                     :, newly_finished, :
                                 ]
                                 if reset_states.shape[1] > 0:
-                                    test_hidden_state[key][:, newly_finished, :] = (
-                                        reset_states
-                                    )
+                                    test_hidden_state[key][
+                                        :, newly_finished, :
+                                    ] = reset_states
 
                     if np.any(newly_finished):
                         completed_episode_scores[newly_finished] = scores[

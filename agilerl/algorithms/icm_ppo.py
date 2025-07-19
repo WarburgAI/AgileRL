@@ -1,4 +1,5 @@
 import copy
+import time
 import warnings
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
@@ -235,63 +236,63 @@ class ICM_PPO(RLAlgorithm):
         assert isinstance(gamma, (float, int, torch.Tensor)), "Gamma must be a float."
         assert isinstance(gae_lambda, (float, int)), "Lambda must be a float."
         assert gae_lambda >= 0, "Lambda must be greater than or equal to zero."
-        assert isinstance(action_std_init, (float, int)), (
-            "Action standard deviation must be a float."
-        )
-        assert action_std_init >= 0, (
-            "Action standard deviation must be greater than or equal to zero."
-        )
-        assert isinstance(clip_coef, (float, int)), (
-            "Clipping coefficient must be a float."
-        )
-        assert clip_coef >= 0, (
-            "Clipping coefficient must be greater than or equal to zero."
-        )
-        assert isinstance(ent_coef, (float, int)), (
-            "Entropy coefficient must be a float."
-        )
-        assert ent_coef >= 0, (
-            "Entropy coefficient must be greater than or equal to zero."
-        )
-        assert isinstance(vf_coef, (float, int)), (
-            "Value function coefficient must be a float."
-        )
-        assert vf_coef >= 0, (
-            "Value function coefficient must be greater than or equal to zero."
-        )
-        assert isinstance(max_grad_norm, (float, int)), (
-            "Maximum norm for gradient clipping must be a float."
-        )
-        assert max_grad_norm >= 0, (
-            "Maximum norm for gradient clipping must be greater than or equal to zero."
-        )
-        assert isinstance(target_kl, (float, int)) or target_kl is None, (
-            "Target KL divergence threshold must be a float."
-        )
+        assert isinstance(
+            action_std_init, (float, int)
+        ), "Action standard deviation must be a float."
+        assert (
+            action_std_init >= 0
+        ), "Action standard deviation must be greater than or equal to zero."
+        assert isinstance(
+            clip_coef, (float, int)
+        ), "Clipping coefficient must be a float."
+        assert (
+            clip_coef >= 0
+        ), "Clipping coefficient must be greater than or equal to zero."
+        assert isinstance(
+            ent_coef, (float, int)
+        ), "Entropy coefficient must be a float."
+        assert (
+            ent_coef >= 0
+        ), "Entropy coefficient must be greater than or equal to zero."
+        assert isinstance(
+            vf_coef, (float, int)
+        ), "Value function coefficient must be a float."
+        assert (
+            vf_coef >= 0
+        ), "Value function coefficient must be greater than or equal to zero."
+        assert isinstance(
+            max_grad_norm, (float, int)
+        ), "Maximum norm for gradient clipping must be a float."
+        assert (
+            max_grad_norm >= 0
+        ), "Maximum norm for gradient clipping must be greater than or equal to zero."
+        assert (
+            isinstance(target_kl, (float, int)) or target_kl is None
+        ), "Target KL divergence threshold must be a float."
         if target_kl is not None:
-            assert target_kl >= 0, (
-                "Target KL divergence threshold must be greater than or equal to zero."
-            )
-        assert isinstance(update_epochs, int), (
-            "Policy update epochs must be an integer."
-        )
-        assert update_epochs >= 1, (
-            "Policy update epochs must be greater than or equal to one."
-        )
-        assert isinstance(wrap, bool), (
-            "Wrap models flag must be boolean value True or False."
-        )
+            assert (
+                target_kl >= 0
+            ), "Target KL divergence threshold must be greater than or equal to zero."
+        assert isinstance(
+            update_epochs, int
+        ), "Policy update epochs must be an integer."
+        assert (
+            update_epochs >= 1
+        ), "Policy update epochs must be greater than or equal to one."
+        assert isinstance(
+            wrap, bool
+        ), "Wrap models flag must be boolean value True or False."
 
         # New parameters for using RolloutBuffer
-        assert isinstance(use_rollout_buffer, bool), (
-            "Use rollout buffer flag must be boolean value True or False."
-        )
-        assert isinstance(recurrent, bool), (
-            "Has hidden states flag must be boolean value True or False."
-        )
-        assert isinstance(bptt_sequence_type, BPTTSequenceType), (
-            "bptt_sequence_type must be a BPTTSequenceType enum value."
-        )
+        assert isinstance(
+            use_rollout_buffer, bool
+        ), "Use rollout buffer flag must be boolean value True or False."
+        assert isinstance(
+            recurrent, bool
+        ), "Has hidden states flag must be boolean value True or False."
+        assert isinstance(
+            bptt_sequence_type, BPTTSequenceType
+        ), "bptt_sequence_type must be a BPTTSequenceType enum value."
 
         if not use_rollout_buffer:
             warnings.warn(
@@ -306,21 +307,21 @@ class ICM_PPO(RLAlgorithm):
                 stacklevel=2,
             )
         # Validate ICM parameters
-        assert isinstance(icm_lr, float) and icm_lr > 0, (
-            "ICM learning rate must be a positive float."
-        )
-        assert isinstance(icm_beta, float) and 0 <= icm_beta <= 1, (
-            "ICM beta must be a float between 0 and 1."
-        )
-        assert isinstance(icm_loss_weight, float) and 0 <= icm_loss_weight <= 1, (
-            "ICM loss weight must be a float between 0 and 1."
-        )
+        assert (
+            isinstance(icm_lr, float) and icm_lr > 0
+        ), "ICM learning rate must be a positive float."
+        assert (
+            isinstance(icm_beta, float) and 0 <= icm_beta <= 1
+        ), "ICM beta must be a float between 0 and 1."
+        assert (
+            isinstance(icm_loss_weight, float) and 0 <= icm_loss_weight <= 1
+        ), "ICM loss weight must be a float between 0 and 1."
         assert (
             isinstance(intrinsic_reward_weight, float) and intrinsic_reward_weight >= 0
         ), "Intrinsic reward weight (eta) must be non-negative."
-        assert isinstance(use_shared_encoder_for_icm, bool), (
-            "Flag for sharing ICM encoder must be boolean."
-        )
+        assert isinstance(
+            use_shared_encoder_for_icm, bool
+        ), "Flag for sharing ICM encoder must be boolean."
 
         if not isinstance(action_space, (spaces.Discrete, spaces.MultiDiscrete)):
             warnings.warn(
@@ -524,6 +525,11 @@ class ICM_PPO(RLAlgorithm):
         self.register_network_group(NetworkGroup(eval=self.icm))
 
         self.hidden_state = None
+        self.total_learn_time = 0.0
+        self.total_collection_time = 0.0
+        self.last_collection_time = 0.0
+        self.last_learn_time = 0.0
+        self.last_learn_time_metrics = {}
 
     def create_rollout_buffer(self) -> None:
         """Creates a rollout buffer with the current configuration and adds space for encoder_out."""
@@ -790,6 +796,7 @@ class ICM_PPO(RLAlgorithm):
             )
 
         n_steps = n_steps or self.learn_step
+        start_time = time.time()
         if reset_on_collect:
             # Initial reset
             obs, info = env.reset()
@@ -843,6 +850,7 @@ class ICM_PPO(RLAlgorithm):
                 last_obs = obs
 
             # Get intrinsic reward
+            t_start_intrinsic_reward = time.time()
             intrinsic_reward, _, _ = self.get_intrinsic_reward(
                 action,
                 last_obs,
@@ -852,10 +860,16 @@ class ICM_PPO(RLAlgorithm):
                 current_hidden_state,
                 next_hidden,
             )
+            t_end_intrinsic_reward = time.time()
+            self.last_learn_time_metrics["intrinsic_reward_calculation_time"] = (
+                self.last_learn_time_metrics.get(
+                    "intrinsic_reward_calculation_time", 0.0
+                )
+                + (t_end_intrinsic_reward - t_start_intrinsic_reward)
+            )
             combined_reward = (
-                (1 - self.intrinsic_reward_weight) * reward
-                + intrinsic_reward.detach().cpu().numpy()
-            )  # intrinsic reward is already weighted by self.intrinsic_reward_weight
+                1 - self.intrinsic_reward_weight
+            ) * reward + intrinsic_reward.detach().cpu().numpy()  # intrinsic reward is already weighted by self.intrinsic_reward_weight
 
             # Handle both single environment and vectorized environments terminal states
             if isinstance(done, list) or isinstance(done, np.ndarray):
@@ -947,6 +961,9 @@ class ICM_PPO(RLAlgorithm):
         self.rollout_buffer.compute_returns_and_advantages(
             last_value=last_value, last_done=last_done
         )
+        end_time = time.time()
+        self.last_collection_time = end_time - start_time
+        self.total_collection_time += self.last_collection_time
 
     def get_action(
         self,
@@ -1075,221 +1092,37 @@ class ICM_PPO(RLAlgorithm):
         :return: Dictionary of metrics including total_loss, policy_loss, value_loss, entropy_loss, approx_kl, and clip_fraction.
         :rtype: Dict[str, float]
         """
+        self.last_learn_time_metrics.clear()
+        start_time = time.time()
         # Use rollout buffer if enabled and no experiences provided
         if self.use_rollout_buffer and experiences is None:
-            return self._learn_from_rollout_buffer()
+            metrics = self._learn_from_rollout_buffer()
         elif self.use_rollout_buffer and experiences is not None:
             warnings.warn(
                 "Both rollout buffer and experiences provided. Using provided experiences."
             )
+            metrics = self._deprecated_learn_from_experiences(experiences)
         elif not self.use_rollout_buffer and experiences is None:
             raise ValueError(
                 "Experiences cannot be None when use_rollout_buffer is False"
             )
+        else:
+            metrics = self._deprecated_learn_from_experiences(experiences)
 
-        # Legacy learning from experiences tuple
-        (states, actions, log_probs, rewards, dones, values, next_state, next_done) = (
-            stack_experiences(*experiences)
+        end_time = time.time()
+        self.last_learn_time = end_time - start_time
+        self.total_learn_time += self.last_learn_time
+
+        metrics.update(
+            {
+                "last_learn_time": self.last_learn_time,
+                "total_learn_time": self.total_learn_time,
+                "last_collection_time": self.last_collection_time,
+                "total_collection_time": self.total_collection_time,
+                **self.last_learn_time_metrics,
+            }
         )
-
-        # Bootstrapping returns using GAE advantage estimation
-        dones = dones.long()
-        with torch.no_grad():
-            num_steps = rewards.size(0)
-            next_state = self.preprocess_observation(next_state)
-            next_value = self.critic(next_state).reshape(1, -1).cpu()
-            advantages = torch.zeros_like(rewards).float()
-            last_gae_lambda = 0
-            for t in reversed(range(num_steps)):
-                if t == num_steps - 1:
-                    next_non_terminal = 1.0 - next_done
-                    nextvalue = next_value.squeeze()
-                else:
-                    next_non_terminal = 1.0 - dones[t + 1]
-                    nextvalue = values[t + 1]
-
-                # Calculate delta (TD error)
-                delta = (
-                    rewards[t] + self.gamma * nextvalue * next_non_terminal - values[t]
-                )
-
-                # Use recurrence relation to compute advantage
-                advantages[t] = last_gae_lambda = (
-                    delta
-                    + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lambda
-                )
-
-            returns = advantages + values
-
-        # Flatten experiences from (batch_size, num_envs, ...) to (batch_size*num_envs, ...)
-        # after checking if experiences are vectorized
-        experiences = (states, actions, log_probs, advantages, returns, values)
-        if is_vectorized_experiences(*experiences):
-            experiences = flatten_experiences(*experiences)
-
-        # Move experiences to algo device
-        experiences = self.to_device(*experiences)
-
-        # Get number of samples from the returns tensor
-        num_samples = experiences[4].size(0)
-        batch_idxs = np.arange(num_samples)
-        mean_loss = 0
-        mean_icm_loss = 0
-        mean_icm_i_loss = 0
-        mean_icm_f_loss = 0
-        for epoch in range(self.update_epochs):
-            np.random.shuffle(batch_idxs)
-            for start in range(0, num_samples, self.batch_size):
-                minibatch_idxs = batch_idxs[start : start + self.batch_size]
-                returned_samples = get_experiences_samples(minibatch_idxs, *experiences)
-                batch_latent_pi = None
-                if self.use_shared_encoder_for_icm:
-                    (
-                        batch_states,
-                        batch_actions,
-                        batch_log_probs,
-                        batch_advantages,
-                        batch_returns,
-                        batch_values,
-                        batch_latent_pi,
-                    ) = returned_samples
-                else:
-                    (
-                        batch_states,
-                        batch_actions,
-                        batch_log_probs,
-                        batch_advantages,
-                        batch_returns,
-                        batch_values,
-                    ) = returned_samples
-
-                # batch_actions = batch_actions.squeeze()
-                # batch_returns = batch_returns.squeeze()
-                # batch_log_probs = batch_log_probs.squeeze()
-                # batch_advantages = batch_advantages.squeeze()
-                # batch_values = batch_values.squeeze()
-                # batch_latent_pi = batch_latent_pi.squeeze() if batch_latent_pi is not None else None
-
-                if len(minibatch_idxs) > 1:
-                    log_prob, entropy, value, hidden_state = self.evaluate_actions(
-                        obs=batch_states, actions=batch_actions
-                    )
-
-                    logratio = log_prob - batch_log_probs
-                    ratio = logratio.exp()
-
-                    with torch.no_grad():
-                        approx_kl = ((ratio - 1) - logratio).mean()
-
-                    minibatch_advs = batch_advantages
-                    minibatch_advs = (minibatch_advs - minibatch_advs.mean()) / (
-                        minibatch_advs.std() + 1e-8
-                    )
-
-                    # Policy loss
-                    pg_loss1 = -minibatch_advs * ratio
-                    pg_loss2 = -minibatch_advs * torch.clamp(
-                        ratio, 1 - self.clip_coef, 1 + self.clip_coef
-                    )
-
-                    pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-
-                    # Value loss
-                    value = value.view(-1)
-                    v_loss_unclipped = (value - batch_returns) ** 2
-                    v_clipped = batch_values + torch.clamp(
-                        value - batch_values, -self.clip_coef, self.clip_coef
-                    )
-
-                    v_loss_clipped = (v_clipped - batch_returns) ** 2
-                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-                    v_loss = 0.5 * v_loss_max.mean()
-
-                    entropy_loss = entropy.mean()
-                    loss = (
-                        pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
-                    )
-                    icm_total_loss, icm_i_loss, icm_f_loss = (
-                        torch.tensor(0.0),
-                        torch.tensor(0.0),
-                        torch.tensor(0.0),
-                    )
-
-                    # add ICM loss if using shared encoder, or update independently if not (ppo update first, ICM)
-                    final_loss = loss
-                    if batch_latent_pi is not None:  # i.e. not using shared encoder
-                        # ICM loss
-                        icm_total_loss, icm_i_loss, icm_f_loss, _, _ = (
-                            self.icm.compute_loss(
-                                action_batch_t=batch_actions,
-                                obs_batch_t=batch_states[:-1],
-                                next_obs_batch_t=batch_states[1:],
-                                embedded_obs=batch_latent_pi[:-1],
-                                embedded_next_obs=batch_latent_pi[1:],
-                                hidden_state=(
-                                    hidden_state[:-1] if hidden_state else None
-                                ),
-                                hidden_state_next=(
-                                    hidden_state[1:] if hidden_state else None
-                                ),
-                            )
-                        )
-
-                        final_loss += icm_total_loss
-
-                    # actor + critic loss backprop
-                    self.optimizer.zero_grad()
-                    if self.accelerator is not None:
-                        self.accelerator.backward(final_loss)
-                    else:
-                        final_loss.backward()
-
-                    # Clip gradients
-                    clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-                    clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-                    if self.use_shared_encoder_for_icm:
-                        clip_grad_norm_(self.icm.parameters(), self.max_grad_norm)
-
-                    self.optimizer.step()
-
-                    if batch_latent_pi is None:  # i.e. not using shared encoder
-                        icm_total_loss, icm_i_loss, icm_f_loss, _, _ = self.icm.update(
-                            obs_batch=batch_states[:-1],
-                            action_batch=batch_actions,
-                            next_obs_batch=batch_states[1:],
-                            hidden_state_obs=(
-                                hidden_state[:-1] if hidden_state else None
-                            ),
-                            hidden_state_next_obs=(
-                                hidden_state[1:] if hidden_state else None
-                            ),
-                        )
-
-                    mean_loss += final_loss.item()
-                    mean_icm_loss += icm_total_loss.item()
-                    mean_icm_i_loss += icm_i_loss.item()
-                    mean_icm_f_loss += icm_f_loss.item()
-
-            if self.target_kl is not None:
-                if "approx_kl" in locals() and approx_kl > self.target_kl:
-                    break
-
-        mean_loss /= num_samples * self.update_epochs
-        mean_icm_loss /= num_samples * self.update_epochs
-        mean_icm_i_loss /= num_samples * self.update_epochs
-        mean_icm_f_loss /= num_samples * self.update_epochs
-
-        return {
-            "total_loss": mean_loss,
-            "policy_loss": mean_loss,
-            "value_loss": mean_loss,
-            "entropy_loss": mean_loss,
-            "icm_total_loss": mean_icm_loss,
-            "icm_inverse_loss": mean_icm_i_loss,
-            "icm_forward_loss": mean_icm_f_loss,
-            "approx_kl": approx_kl,
-            "clip_fraction": 0.0,
-        }
+        return metrics
 
     def _learn_from_rollout_buffer(self) -> Dict[str, float]:
         """
@@ -1319,7 +1152,12 @@ class ICM_PPO(RLAlgorithm):
             buffer_td = buffer_td_external
         else:
             # .get_tensor_batch() returns a TensorDict on the specified device
+            t_start_get_batch = time.time()
             buffer_td = self.rollout_buffer.get_tensor_batch(device=self.device)
+            t_end_get_batch = time.time()
+            self.last_learn_time_metrics["get_tensor_batch_time"] = (
+                t_end_get_batch - t_start_get_batch
+            )
 
         if buffer_td.is_empty():
             warnings.warn("Buffer data is empty. Skipping learning step.")
@@ -1339,7 +1177,12 @@ class ICM_PPO(RLAlgorithm):
         advantages = buffer_td["advantages"]
 
         # Normalize advantages
+        t_start_adv_norm = time.time()
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        t_end_adv_norm = time.time()
+        self.last_learn_time_metrics["advantage_normalization_time"] = (
+            t_end_adv_norm - t_start_adv_norm
+        )
 
         batch_size = self.batch_size
         num_samples = observations.size(0)  # Total number of samples in the buffer
@@ -1395,6 +1238,7 @@ class ICM_PPO(RLAlgorithm):
                             "Recurrent policy, but no hidden_states found in minibatch_td for flat learning."
                         )
 
+                t_start_loss = time.time()
                 loss_dict = self.compute_loss(
                     mb_obs,
                     mb_actions,
@@ -1406,6 +1250,12 @@ class ICM_PPO(RLAlgorithm):
                     old_values=mb_old_values,
                     learn_by_bptt=False,
                 )
+                t_end_loss = time.time()
+                self.last_learn_time_metrics["loss_calculation_time"] = (
+                    self.last_learn_time_metrics.get("loss_calculation_time", 0.0)
+                    + (t_end_loss - t_start_loss)
+                )
+
                 kl_sum += loss_dict["approx_kl"]
                 clipfrac_sum += loss_dict["clip_fraction"]
                 loss = loss_dict["loss"]
@@ -1416,6 +1266,7 @@ class ICM_PPO(RLAlgorithm):
                         + (1 - self.icm_loss_weight) * loss
                     )
 
+                t_start_backward = time.time()
                 self.optimizer.zero_grad()
                 loss.backward()  # Gradients accumulate over the sequence within this backward call
                 clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
@@ -1423,6 +1274,11 @@ class ICM_PPO(RLAlgorithm):
                 if self.use_shared_encoder_for_icm:
                     clip_grad_norm_(self.icm.parameters(), self.max_grad_norm)
                 self.optimizer.step()
+                t_end_backward = time.time()
+                self.last_learn_time_metrics["backward_pass_time"] = (
+                    self.last_learn_time_metrics.get("backward_pass_time", 0.0)
+                    + (t_end_backward - t_start_backward)
+                )
 
                 if mb_latent_pi is None:  # i.e. not using shared encoder
                     icm_total_loss, icm_i_loss, icm_f_loss, _, _ = self.icm.update(
@@ -1515,6 +1371,7 @@ class ICM_PPO(RLAlgorithm):
             }
 
         # Normalize advantages globally once before epochs
+        t_start_adv_norm = time.time()
         valid_advantages_tensor = self.rollout_buffer.buffer["advantages"][
             :buffer_actual_size
         ]
@@ -1527,6 +1384,10 @@ class ICM_PPO(RLAlgorithm):
             )
         else:
             warnings.warn("No advantages to normalize in BPTT pre-normalization step.")
+        t_end_adv_norm = time.time()
+        self.last_learn_time_metrics["advantage_normalization_time"] = (
+            t_end_adv_norm - t_start_adv_norm
+        )
 
         # Determine all possible start coordinates for sequences
         num_possible_starts_per_env = buffer_actual_size - seq_len + 1
@@ -1645,12 +1506,18 @@ class ICM_PPO(RLAlgorithm):
                 # Fetch minibatch of sequences; returns TensorDict on self.device
                 # Batch_size: [len(current_coords_minibatch), seq_len]
                 # "initial_hidden_states" is a non-tensor entry in TD: Dict[str, Tensor(batch_seq_size, layers, size)]
+                t_start_get_batch = time.time()
                 current_minibatch_td = (
                     self.rollout_buffer.get_specific_sequences_tensor_batch(
                         seq_len=seq_len,
                         sequence_coords=current_coords_minibatch,
                         device=self.device,
                     )
+                )
+                t_end_get_batch = time.time()
+                self.last_learn_time_metrics["get_sequences_batch_time"] = (
+                    self.last_learn_time_metrics.get("get_sequences_batch_time", 0.0)
+                    + (t_end_get_batch - t_start_get_batch)
                 )
 
                 if (
@@ -1697,6 +1564,7 @@ class ICM_PPO(RLAlgorithm):
                         for key, val in mb_initial_hidden_states_dict.items()
                     }
 
+                t_start_loss = time.time()
                 loss_dict = self.compute_loss(
                     mb_obs_seq,
                     mb_actions_seq,
@@ -1709,6 +1577,11 @@ class ICM_PPO(RLAlgorithm):
                     learn_by_bptt=True,
                     old_values=mb_old_values_seq,
                 )
+                t_end_loss = time.time()
+                self.last_learn_time_metrics["bptt_loss_calculation_time"] = (
+                    self.last_learn_time_metrics.get("bptt_loss_calculation_time", 0.0)
+                    + (t_end_loss - t_start_loss)
+                )
                 approx_kl_divs_minibatch_timesteps.append(loss_dict["approx_kl"])
                 loss = loss_dict["loss"]
 
@@ -1718,6 +1591,7 @@ class ICM_PPO(RLAlgorithm):
                         + (1 - self.icm_loss_weight) * loss
                     )
 
+                t_start_backward = time.time()
                 self.optimizer.zero_grad()
                 loss.backward()  # Gradients accumulate over the sequence within this backward call
                 clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
@@ -1725,6 +1599,11 @@ class ICM_PPO(RLAlgorithm):
                 if self.use_shared_encoder_for_icm:
                     clip_grad_norm_(self.icm.parameters(), self.max_grad_norm)
                 self.optimizer.step()
+                t_end_backward = time.time()
+                self.last_learn_time_metrics["bptt_backward_pass_time"] = (
+                    self.last_learn_time_metrics.get("bptt_backward_pass_time", 0.0)
+                    + (t_end_backward - t_start_backward)
+                )
 
                 if mb_latent_pi is None:  # i.e. not using shared encoder
                     icm_total_loss, icm_i_loss, icm_f_loss, _, _ = self.icm.update(
@@ -2237,9 +2116,9 @@ class ICM_PPO(RLAlgorithm):
                                     :, newly_finished, :
                                 ]
                                 if reset_states.shape[1] > 0:
-                                    test_hidden_state[key][:, newly_finished, :] = (
-                                        reset_states
-                                    )
+                                    test_hidden_state[key][
+                                        :, newly_finished, :
+                                    ] = reset_states
 
                     if np.any(newly_finished):
                         completed_episode_scores[newly_finished] = scores[
