@@ -582,9 +582,6 @@ class Mutations:
         if mutate_param.value is None:
             mutate_param.value = getattr(individual, mutate_attr)
 
-        # Store old value for logging
-        old_value = getattr(individual, mutate_attr)
-
         # Randomly grow or shrink hyperparameters by specified factors
         new_value = mutate_param.mutate()
 
@@ -593,21 +590,10 @@ class Mutations:
         # Log hyperparameter mutation to individual agent run if available
         if self.agent_run_manager is not None and hasattr(individual, "original_id"):
             log_data = {
-                f"hp_{mutate_attr}_old": (
-                    float(old_value)
-                    if isinstance(old_value, (int, float, np.number))
-                    else old_value
-                ),
-                f"hp_{mutate_attr}_new": (
+                f"hp_{mutate_attr}": (
                     float(new_value)
                     if isinstance(new_value, (int, float, np.number))
                     else new_value
-                ),
-                f"hp_{mutate_attr}_change": (
-                    float(new_value - old_value)
-                    if isinstance(old_value, (int, float, np.number))
-                    and isinstance(new_value, (int, float, np.number))
-                    else 0
                 ),
                 "mutation_type": "hyperparameter",
                 "mutation_parameter": mutate_attr,
