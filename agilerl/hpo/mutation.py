@@ -158,6 +158,8 @@ class Mutations:
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
+    :param wandb_run: WandB run object for logging mutations, defaults to None
+    :type wandb_run: Optional[Any], optional
     """
 
     def __init__(
@@ -174,6 +176,8 @@ class Mutations:
         rand_seed: Optional[int] = None,
         device: str = "cpu",
         accelerator: Optional[Accelerator] = None,
+        wandb_run: Optional[Any] = None,
+        agent_run_manager: Optional[Any] = None,
     ):
         assert isinstance(
             no_mutation, (float, int)
@@ -244,11 +248,24 @@ class Mutations:
         self.mutate_elite = mutate_elite
         self.device = device
         self.accelerator = accelerator
+        self.wandb_run = wandb_run
+        self.agent_run_manager = agent_run_manager
 
         self.pretraining_mut_options, self.pretraining_mut_proba = (
             self.get_mutations_options(pretraining=True)
         )
         self.mut_options, self.mut_proba = self.get_mutations_options()
+
+        # Track current step for logging
+        self.current_step = 0
+
+    def set_step(self, step: int) -> None:
+        """Set the current step for logging purposes.
+
+        :param step: Current training step
+        :type step: int
+        """
+        self.current_step = step
 
     def get_mutations_options(
         self, pretraining: bool = False
@@ -291,6 +308,15 @@ class Mutations:
         :param individual: Individual agent from population
         :type individual: object
         """
+        # Log no mutation to individual agent run if available
+        if self.agent_run_manager is not None and hasattr(individual, "original_id"):
+            log_data = {
+                "mutation_type": "none",
+            }
+            self.agent_run_manager.log_agent_metrics(
+                individual.original_id, log_data, self.current_step
+            )
+
         individual.mut = "None"  # No mutation
         return individual
 
@@ -556,10 +582,40 @@ class Mutations:
         if mutate_param.value is None:
             mutate_param.value = getattr(individual, mutate_attr)
 
+        # Store old value for logging
+        old_value = getattr(individual, mutate_attr)
+
         # Randomly grow or shrink hyperparameters by specified factors
         new_value = mutate_param.mutate()
 
         setattr(individual, mutate_attr, new_value)
+
+        # Log hyperparameter mutation to individual agent run if available
+        if self.agent_run_manager is not None and hasattr(individual, "original_id"):
+            log_data = {
+                f"hp_{mutate_attr}_old": (
+                    float(old_value)
+                    if isinstance(old_value, (int, float, np.number))
+                    else old_value
+                ),
+                f"hp_{mutate_attr}_new": (
+                    float(new_value)
+                    if isinstance(new_value, (int, float, np.number))
+                    else new_value
+                ),
+                f"hp_{mutate_attr}_change": (
+                    float(new_value - old_value)
+                    if isinstance(old_value, (int, float, np.number))
+                    and isinstance(new_value, (int, float, np.number))
+                    else 0
+                ),
+                "mutation_type": "hyperparameter",
+                "mutation_parameter": mutate_attr,
+            }
+
+            self.agent_run_manager.log_agent_metrics(
+                individual.original_id, log_data, self.current_step
+            )
 
         # Need to reinitialize respective optimizer if mutated learning rate
         if mutate_attr in individual.get_lr_names():
@@ -630,6 +686,20 @@ class Mutations:
 
             setattr(individual, network_group.eval, eval_module)
 
+        # Log activation mutation to individual agent run if available
+        if (
+            self.agent_run_manager is not None
+            and hasattr(individual, "original_id")
+            and not no_activation
+        ):
+            log_data = {
+                "mutation_type": "activation",
+                "activation_selection": str(self.activation_selection),
+            }
+            self.agent_run_manager.log_agent_metrics(
+                individual.original_id, log_data, self.current_step
+            )
+
         self.reinit_opt(individual)  # Reinitialise optimizer
         individual.mut = "act" if not no_activation else "None"
         return individual
@@ -689,6 +759,17 @@ class Mutations:
             offspring_policy = self.to_device(offspring_policy)
 
         setattr(individual, registry.policy, offspring_policy)
+
+        # Log parameter mutation to individual agent run if available
+        if self.agent_run_manager is not None and hasattr(individual, "original_id"):
+            log_data = {
+                "mutation_type": "parameter",
+                "mutation_sd": self.mutation_sd,
+            }
+
+            self.agent_run_manager.log_agent_metrics(
+                individual.original_id, log_data, self.current_step
+            )
 
         self.reinit_opt(individual)  # Reinitialise optimizer
         individual.mut = "param"
@@ -848,6 +929,22 @@ class Mutations:
                 self._reinit_bandit_grads(individual, offsprings, old_exp_layer)
 
         individual.mutation_hook()  # Apply mutation hook
+
+        # Log architecture mutation to individual agent run if available
+        if self.agent_run_manager is not None and hasattr(individual, "original_id"):
+            mutation_applied = (
+                applied_mutations[0]
+                if isinstance(applied_mutations, list)
+                else applied_mutations
+            )
+            log_data = {
+                "mutation_type": "architecture",
+                "architecture_method": str(mutation_applied),
+                "new_layer_prob": self.new_layer_prob,
+            }
+            self.agent_run_manager.log_agent_metrics(
+                individual.original_id, log_data, self.current_step
+            )
 
         self.reinit_opt(individual)  # Reinitialise optimizer
         individual.mut = (

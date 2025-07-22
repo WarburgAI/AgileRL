@@ -27,6 +27,7 @@ class TournamentSelection:
         elitism: bool,
         population_size: int,
         eval_loop: int,
+        agent_run_manager=None,
     ) -> None:
         assert tournament_size > 0, "Tournament size must be greater than zero."
         assert isinstance(elitism, bool), "Elitism must be boolean value True or False."
@@ -37,6 +38,7 @@ class TournamentSelection:
         self.population_size = population_size
         self.eval_loop = eval_loop
         self.language_model = None
+        self.agent_run_manager = agent_run_manager
 
     def _tournament(self, fitness_values: List[float]) -> int:
         """
@@ -71,18 +73,18 @@ class TournamentSelection:
         return elite, rank, max_id
 
     def select(
-        self, population: PopulationType
+        self, population: PopulationType, current_step: int = 0
     ) -> Tuple[EvolvableAlgorithm, PopulationType]:
         if self.language_model is None:
             self.language_model = population[0].algo == "GRPO"
         return (
-            self._select_llm_agents(population)
+            self._select_llm_agents(population, current_step)
             if self.language_model
-            else self._select_standard_agents(population)
+            else self._select_standard_agents(population, current_step)
         )
 
     def _select_standard_agents(
-        self, population: PopulationType
+        self, population: PopulationType, current_step: int = 0
     ) -> Tuple[EvolvableAlgorithm, PopulationType]:
         """
         Returns best agent and new population of agents following tournament selection.
@@ -93,22 +95,62 @@ class TournamentSelection:
         :rtype: tuple[EvolvableAlgorithm, PopulationType]
         """
         elite, rank, max_id = self._elitism(population)
+
+        # Log tournament results if run manager available
+        if self.agent_run_manager:
+            tournament_metrics = {
+                "tournament_rank": rank.tolist(),
+                "elite_fitness": (
+                    np.mean(elite.fitness[-self.eval_loop :]) if elite.fitness else 0
+                ),
+                "selection_pressure": self.tournament_size / len(population),
+            }
+
+            # Log to elite's run
+            if hasattr(elite, "original_id"):
+                self.agent_run_manager.log_agent_metrics(
+                    elite.original_id,
+                    {**tournament_metrics, "selected_as": "elite"},
+                    current_step,  # Use current step instead of hardcoded 0
+                )
+
         new_population = []
         if self.elitism:  # keep top agent in population
-            new_population.append(elite.clone(wrap=False))
+            elite_clone = elite.clone(wrap=False)
+            elite_clone.original_id = getattr(elite, "original_id", 0)
+            new_population.append(elite_clone)
             selection_size = self.population_size - 1
         else:
             selection_size = self.population_size
+
         # select parents of next gen using tournament selection
         for idx in range(selection_size):
             max_id += 1
-            actor_parent = population[self._tournament(rank)]
+            parent_idx = self._tournament(rank)
+            actor_parent = population[parent_idx]
             new_individual = actor_parent.clone(max_id, wrap=False)
+
+            # Track parent relationship for internal logging
+            # Note: Neptune forking provides lineage tracking in the UI
+            new_individual.parent_id = getattr(actor_parent, "original_id", parent_idx)
+            new_individual.original_id = (
+                max_id  # Unique ID for agent run management and logging
+            )
+
+            # Log selection
+            if self.agent_run_manager and hasattr(actor_parent, "original_id"):
+                self.agent_run_manager.log_agent_metrics(
+                    actor_parent.original_id,
+                    {"selected_as": "parent", "offspring_count": 1},
+                    current_step,
+                )
+
             new_population.append(new_individual)
+
         return elite, new_population
 
     def _select_llm_agents(
-        self, population: PopulationType
+        self, population: PopulationType, current_step: int = 0
     ) -> Tuple[EvolvableAlgorithm, PopulationType]:
         """
         Returns best agent and new population of agents following tournament selection.

@@ -357,6 +357,8 @@ class ICM_PPO(RLAlgorithm):
         self.action_std_init = action_std_init
         self.clip_coef = clip_coef
         self.ent_coef = ent_coef
+        self.icm_lr = icm_lr
+        self.icm_beta = icm_beta
         self.vf_coef = vf_coef
         self.max_grad_norm = max_grad_norm
         self.target_kl = target_kl
@@ -494,6 +496,7 @@ class ICM_PPO(RLAlgorithm):
                 "icm_inverse_model",
                 "icm_forward_model",
             ]
+
             self.icm_optimizer = OptimizerWrapper(
                 optimizer_cls=optim.Adam,
                 network_names=icm_names_to_optimize,
