@@ -34,8 +34,6 @@ from numpy.typing import ArrayLike
 from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
 
-from agilerl.components.rollout_buffer import RolloutBuffer
-
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
     MutationRegistry,
@@ -43,6 +41,7 @@ from agilerl.algorithms.core.registry import (
     OptimizerConfig,
 )
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
+from agilerl.components.rollout_buffer import RolloutBuffer
 from agilerl.protocols import (
     AgentWrapper,
     EvolvableAttributeDict,
@@ -369,7 +368,11 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         # Exclude attributes that are EvolvableModule or Optimizer objects (also check for nested
         # module-related attributes for multi-agent algorithms)
         exclude = list(agent.evolvable_attributes().keys())
-        exclude += [attr for attr, val in attributes if isinstance(val, (TensorDict, RolloutBuffer))]
+        exclude += [
+            attr
+            for attr, val in attributes
+            if isinstance(val, (TensorDict, RolloutBuffer))
+        ]
 
         # Exclude private and built-in attributes
         attributes = [
@@ -642,7 +645,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             on_device.append(exp)
 
         return on_device
-
 
     def evolvable_attributes(
         self, networks_only: bool = False
@@ -949,6 +951,13 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                     loaded_modules[name].append(mod)
             else:
                 init_dict["device"] = device
+
+                if (
+                    "encoder_config" in init_dict
+                    and "device" in init_dict["encoder_config"]
+                ):
+                    init_dict["encoder_config"]["device"] = device
+
                 module = module_cls(**init_dict)
                 loaded_modules[name] = module
 
