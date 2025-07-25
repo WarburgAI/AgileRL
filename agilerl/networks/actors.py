@@ -273,6 +273,7 @@ class StochasticActor(EvolvableNetwork):
         use_experimental_distribution: bool = False,
         random_seed: Optional[int] = None,
         encoder_name: str = "encoder",
+        **kwargs,
     ):
         super().__init__(
             observation_space,
@@ -288,6 +289,11 @@ class StochasticActor(EvolvableNetwork):
             random_seed=random_seed,
             encoder_name=encoder_name,
         )
+
+        for key, value in kwargs.items():
+            print(
+                f"an extra argument has been passed and will be ignored: {key} = {value}"
+            )
 
         # Require the head to output logits to parameterize a distribution
         if head_config is None:
