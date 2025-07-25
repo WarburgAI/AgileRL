@@ -918,17 +918,19 @@ class ICM_PPO(RLAlgorithm):
         self.total_learn_time += self.last_learn_time
 
         # Add timing metrics from TimingTracker
-        timing_metrics = {
-            "time/last_learn_time": self.last_learn_time,
-            "time/total_learn_time": self.total_learn_time,
-            "time/last_collection_time": self.last_collection_time,
-            "time/total_collection_time": self.total_collection_time,
-        }
+        metrics = self.learn_metrics.get_all_averages("learn/")
+        metrics.update(
+            {
+                "time/last_learn_time": self.last_learn_time,
+                "time/total_learn_time": self.total_learn_time,
+                "time/last_collection_time": self.last_collection_time,
+                "time/total_collection_time": self.total_collection_time,
+            }
+        )
 
         # Add detailed timing metrics from timing_tracker
-        timing_metrics.update(self.timing_tracker.get_all_metrics())
+        metrics.update(self.timing_tracker.get_metrics())
 
-        metrics.update(timing_metrics)
         return metrics
 
     def _learn_from_rollout_buffer(self) -> Dict[str, float]:
@@ -1518,15 +1520,15 @@ class ICM_PPO(RLAlgorithm):
             )
 
             return {
-                "learn/loss": loss,
-                "learn/policy_loss": policy_loss_avg_over_seq,
-                "learn/value_loss": value_loss_avg_over_seq,
-                "learn/entropy_loss": entropy_loss_avg_over_seq,
-                "learn/approx_kl": approx_kl,
-                "learn/clip_fraction": clip_fraction,
-                "learn/icm_total_loss": icm_total_loss_avg_over_seq,
-                "learn/icm_i_loss": icm_i_loss_avg_over_seq,
-                "learn/icm_f_loss": icm_f_loss_avg_over_seq,
+                "loss": loss,
+                "policy_loss": policy_loss_avg_over_seq,
+                "value_loss": value_loss_avg_over_seq,
+                "entropy_loss": entropy_loss_avg_over_seq,
+                "approx_kl": approx_kl,
+                "clip_fraction": clip_fraction,
+                "icm_total_loss": icm_total_loss_avg_over_seq,
+                "icm_i_loss": icm_i_loss_avg_over_seq,
+                "icm_f_loss": icm_f_loss_avg_over_seq,
             }
         else:
             # Get values and next hidden state (which we ignore in flat learning)
@@ -1591,15 +1593,15 @@ class ICM_PPO(RLAlgorithm):
             )
 
             return {
-                "learn/loss": loss,
-                "learn/policy_loss": policy_loss,
-                "learn/value_loss": value_loss,
-                "learn/entropy_loss": entropy_loss,
-                "learn/approx_kl": approx_kl,
-                "learn/clip_fraction": clip_fraction,
-                "learn/icm_total_loss": icm_total_loss,
-                "learn/icm_i_loss": icm_i_loss,
-                "learn/icm_f_loss": icm_f_loss,
+                "loss": loss,
+                "policy_loss": policy_loss,
+                "value_loss": value_loss,
+                "entropy_loss": entropy_loss,
+                "approx_kl": approx_kl,
+                "clip_fraction": clip_fraction,
+                "icm_total_loss": icm_total_loss,
+                "icm_i_loss": icm_i_loss,
+                "icm_f_loss": icm_f_loss,
             }
 
     def get_intrinsic_reward(
