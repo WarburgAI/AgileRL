@@ -24,6 +24,9 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import StochasticActor
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.value_networks import ValueNetwork
+
+# Import enhanced rollout collection functions
+from agilerl.rollouts.on_policy import collect_rollouts, collect_rollouts_recurrent
 from agilerl.typing import ArrayOrTensor, BPTTSequenceType, ExperiencesType, GymEnvType
 from agilerl.utils.algo_utils import (
     flatten_experiences,
@@ -731,242 +734,37 @@ class ICM_PPO(RLAlgorithm):
         actions: ArrayOrTensor,
         hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Evaluates the actions.
+        """Evaluate actions for given observations and return log probabilities, entropy, and values.
 
-        :param obs: Environment observation, or multiple observations in a batch
-        :type obs: numpy.ndarray[float]
+        :param obs: Observations
+        :type obs: ArrayOrTensor
         :param actions: Actions to evaluate
-        :type actions: torch.Tensor
-        :param hidden_state: Hidden state for recurrent policies, defaults to None. Expected shape: dict with tensors of shape (batch_size, 1, hidden_size).
-        :type hidden_state: Dict[str, ArrayOrTensor], optional
-        :return: Log probability, entropy, and state values
+        :type actions: ArrayOrTensor
+        :param hidden_state: Hidden state for recurrent policies, defaults to None
+        :type hidden_state: Optional[Dict[str, ArrayOrTensor]], optional
+
+        :return: Log probabilities, entropy, and values
         :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
         obs = self.preprocess_observation(obs)
 
-        eval_hidden_state = None
-        if self.recurrent and hidden_state is not None:
-            # Reshape hidden state for RNN: (batch_size, 1, hidden_size) -> (1, batch_size, hidden_size)
-            eval_hidden_state = {
-                key: val.permute(1, 0, 2) for key, val in hidden_state.items()
-            }
-
-        # Get values from actor-critic
-        if self.use_shared_encoder_for_icm:
-            _, _, entropy, values, _, hidden_state, _ = self._get_action_and_values(
-                obs,
-                hidden_state=eval_hidden_state,
-                sample=False,  # No need to sample here
+        # Get action probabilities and values
+        if self.recurrent:
+            action_probs, values, _ = self._get_action_and_values(
+                obs, hidden_state=hidden_state
             )
         else:
-            _, _, entropy, values, _, hidden_state = self._get_action_and_values(
-                obs,
-                hidden_state=eval_hidden_state,
-                sample=False,  # No need to sample here
-            )
+            action_probs, values, _ = self._get_action_and_values(obs)
 
-        # Get log probability of the actions using the *original* hidden state if needed by actor?
-        # Let's assume actor.action_log_prob does not require hidden state for now, or handles it internally.
-        # If it does require hidden state, we might need to pass eval_hidden_state or recalculate.
-        log_prob = self.actor.action_log_prob(actions)
+        # Get log probabilities and entropy
+        log_probs = self.actor.get_log_prob(action_probs, actions)
+        entropy = self.actor.get_entropy(action_probs)
 
         # Use -log_prob as entropy when squashing output in continuous action spaces
         if entropy is None:
-            entropy = -log_prob.mean()
+            entropy = -log_probs.mean()
 
-        return log_prob, entropy, values, hidden_state
-
-    def collect_rollouts(
-        self,
-        env: GymEnvType,
-        n_steps: int = None,
-        reset_on_collect: bool = True,
-    ) -> None:
-        """
-        Collect rollouts from the environment and store them in the rollout buffer.
-
-        :param env: The environment to collect rollouts from
-        :type env: GymEnvType
-        :param n_steps: Number of steps to collect, defaults to self.learn_step
-        :type n_steps: int, optional
-        :param reset_on_collect: Whether to reset the buffer before collecting (Note: current implementation always resets), defaults to True
-        :type reset_on_collect: bool, optional
-        :rtype: None
-        """
-        if not self.use_rollout_buffer:
-            raise RuntimeError(
-                "collect_rollouts can only be used when use_rollout_buffer=True"
-            )
-
-        n_steps = n_steps or self.learn_step
-        start_time = time.time()
-        if reset_on_collect:
-            # Initial reset
-            obs, info = env.reset()
-
-            # self.hidden_state stores the current hidden state for the actor across steps
-            self.hidden_state = (
-                self.get_initial_hidden_state(self.num_envs) if self.recurrent else None
-            )
-        else:
-            obs, info = self.last_obs
-
-        self.rollout_buffer.reset()
-
-        current_hidden_state = self.hidden_state
-
-        encoder_last_output = None
-        encoder_output = None
-        last_obs = None
-        for _ in range(n_steps):
-            # Get action
-            if self.recurrent:
-                returned_tuple = self.get_action(
-                    obs,
-                    action_mask=info.get("action_mask", None),
-                    hidden_state=current_hidden_state,
-                )
-                if self.use_shared_encoder_for_icm:
-                    action, log_prob, _, value, next_hidden, encoder_output = (
-                        returned_tuple
-                    )
-                else:
-                    action, log_prob, _, value, next_hidden = returned_tuple
-
-                self.hidden_state = next_hidden
-            else:
-                # No need for next_hidden in non-recurrent networks, so we're not even returning it
-                returned_tuple = self.get_action(
-                    obs, action_mask=info.get("action_mask", None)
-                )
-                if self.use_shared_encoder_for_icm:
-                    action, log_prob, _, value, _, encoder_output = returned_tuple
-                else:
-                    action, log_prob, _, value, _ = returned_tuple
-
-            # Execute action
-            next_obs, reward, done, truncated, next_info = env.step(action)
-
-            if self.use_shared_encoder_for_icm:
-                encoder_last_output = encoder_output
-            else:
-                last_obs = obs
-
-            # Get intrinsic reward
-            t_start_intrinsic_reward = time.time()
-            intrinsic_reward, _, _ = self.get_intrinsic_reward(
-                action,
-                last_obs,
-                obs,
-                encoder_last_output,
-                encoder_output,
-                current_hidden_state,
-                next_hidden,
-            )
-            t_end_intrinsic_reward = time.time()
-            self.last_learn_time_metrics["time/intrinsic_reward_calculation_time"] = (
-                self.last_learn_time_metrics.get(
-                    "time/intrinsic_reward_calculation_time", 0.0
-                )
-                + (t_end_intrinsic_reward - t_start_intrinsic_reward)
-            )
-            combined_reward = (
-                1 - self.intrinsic_reward_weight
-            ) * reward + intrinsic_reward.detach().cpu().numpy()  # intrinsic reward is already weighted by self.intrinsic_reward_weight
-
-            # Handle both single environment and vectorized environments terminal states
-            if isinstance(done, list) or isinstance(done, np.ndarray):
-                is_terminal = (
-                    np.logical_or(done, truncated)
-                    if isinstance(truncated, (list, np.ndarray))
-                    else done
-                )
-            else:
-                is_terminal = done or truncated
-
-            # Ensure shapes are correct (num_envs, ...) for rollout buffer. This isn't necessary by itself, but it's good for debugging.
-            reward = np.atleast_1d(combined_reward)
-            is_terminal = np.atleast_1d(is_terminal)
-            value = np.atleast_1d(value)
-            log_prob = np.atleast_1d(log_prob)
-            if self.use_shared_encoder_for_icm:
-                encoder_output = np.atleast_1d(encoder_output)
-
-            self.add_to_rollout_buffer(
-                obs=obs,
-                action=action,
-                reward=reward,
-                done=is_terminal,
-                value=value.reshape(-1),
-                log_prob=log_prob,
-                next_obs=next_obs,
-                hidden_state=current_hidden_state,
-                encoder_out=encoder_output,
-            )
-
-            # Reset hidden state for finished environments
-            if self.recurrent and np.any(is_terminal):
-                # Create a mask for finished environments
-                finished_mask = is_terminal.astype(bool)
-                # Get initial hidden states only for the finished environments
-                # Need a way to get initial state for a subset of envs
-                # For simplicity, re-initialize all and mask later, or handle dicts/tensors carefully
-                initial_hidden_states_for_reset = self.get_initial_hidden_state(
-                    self.num_envs
-                )
-
-                if isinstance(self.hidden_state, torch.Tensor):
-                    reset_states = initial_hidden_states_for_reset[finished_mask]
-                    if reset_states.shape[0] > 0:  # Only update if any finished
-                        self.hidden_state[finished_mask] = reset_states
-                elif isinstance(self.hidden_state, dict):
-                    for key in self.hidden_state:
-                        # initial_hidden_states_for_reset[key] has shape (1, num_envs, hidden_size)
-                        # finished_mask has shape (num_envs,)
-                        # Index along the num_envs dimension (dim 1)
-                        reset_states = initial_hidden_states_for_reset[key][
-                            :, finished_mask, :
-                        ]
-
-                        if (
-                            reset_states.shape[1] > 0
-                        ):  # Check num_envs dimension if any env finished
-                            # Assign to the correct slice along the num_envs dimension
-                            self.hidden_state[key][:, finished_mask, :] = reset_states
-                # Add handling for numpy if needed
-
-            # Update the current hidden state for the next timestep
-            if self.recurrent:
-                current_hidden_state = self.hidden_state
-
-            # Update for next step
-            obs = next_obs
-            info = next_info
-
-        self.last_obs = (next_obs, info)  # Store the last observation for the next step
-
-        # Compute advantages and returns
-        with torch.no_grad():
-            # Get value for last observation
-            if self.recurrent:
-                returned_tuple = self._get_action_and_values(
-                    obs, hidden_state=self.hidden_state
-                )
-            else:
-                returned_tuple = self._get_action_and_values(obs)
-
-            last_value = returned_tuple[3]
-
-            last_value = last_value.cpu().numpy()
-            last_done = np.atleast_1d(done)  # Ensure last_done has shape (num_envs,)
-
-        # Compute returns and advantages
-        self.rollout_buffer.compute_returns_and_advantages(
-            last_value=last_value, last_done=last_done
-        )
-        end_time = time.time()
-        self.last_collection_time = end_time - start_time
-        self.total_collection_time += self.last_collection_time
+        return log_probs, entropy, values, hidden_state
 
     def get_action(
         self,
@@ -2441,6 +2239,21 @@ class ICM_PPO(RLAlgorithm):
             if self.target_kl is not None:
                 if approx_kl > self.target_kl:
                     break
+
+        # Usage Example: ICM_PPO now uses the enhanced collect_rollouts functions
+        #
+        # For non-recurrent ICM_PPO:
+        # completed_scores = collect_rollouts(agent, env, n_steps=2048, reset_on_collect=True)
+        #
+        # For recurrent ICM_PPO:
+        # completed_scores = collect_rollouts_recurrent(agent, env, n_steps=2048, reset_on_collect=False)
+        #
+        # The enhanced functions automatically detect ICM capabilities and:
+        # - Calculate intrinsic rewards using agent.get_intrinsic_reward()
+        # - Handle encoder outputs when use_shared_encoder_for_icm=True
+        # - Use agent.add_to_rollout_buffer() for ICM-specific buffer storage
+        # - Track timing metrics including intrinsic reward calculation time
+        # - Support stateful collection with reset_on_collect parameter
 
         mean_loss /= num_samples * self.update_epochs
         return mean_loss

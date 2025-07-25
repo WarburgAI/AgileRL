@@ -3,10 +3,10 @@ import warnings
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import numpy as np
-from regex import P
 import torch
 import torch.optim as optim
 from gymnasium import spaces
+from regex import P
 from torch.nn.utils import clip_grad_norm_
 
 from agilerl.algorithms.core import RLAlgorithm
@@ -18,6 +18,9 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import StochasticActor
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.value_networks import ValueNetwork
+
+# Import enhanced rollout collection functions
+from agilerl.rollouts.on_policy import collect_rollouts, collect_rollouts_recurrent
 from agilerl.typing import ArrayOrTensor, ExperiencesType, GymEnvType
 from agilerl.utils.algo_utils import (
     flatten_experiences,
@@ -39,14 +42,14 @@ class CPPORolloutBuffer(RolloutBuffer):
 
     def add(
         self,
-        *, # force keyword arguments
+        *,  # force keyword arguments
         obs: ArrayOrTensor,
         action: ArrayOrTensor,
         reward: ArrayOrTensor,
         done: ArrayOrTensor,
         value: ArrayOrTensor,
         log_prob: ArrayOrTensor,
-        update: ArrayOrTensor, # New argument for CPPO
+        update: ArrayOrTensor,  # New argument for CPPO
         next_obs: Optional[ArrayOrTensor] = None,
         hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
     ) -> None:
@@ -64,7 +67,9 @@ class CPPORolloutBuffer(RolloutBuffer):
         )
         # Store the update term (adjust index logic if super().add changes self.pos)
         if self.updates is not None:
-            pos_to_add = (self.pos - 1) % self.capacity # Position where last data was added
+            pos_to_add = (
+                self.pos - 1
+            ) % self.capacity  # Position where last data was added
             update = np.asarray(update)
             self.updates[pos_to_add] = update
 
@@ -81,16 +86,19 @@ class CPPORolloutBuffer(RolloutBuffer):
             if self.full:
                 updates_to_use = self.updates
             else:
-                updates_to_use = self.updates[:self.pos]
+                updates_to_use = self.updates[: self.pos]
 
             if self.advantages.shape == updates_to_use.shape:
                 self.advantages -= updates_to_use
             else:
                 warnings.warn(
                     f"Shape mismatch between advantages ({self.advantages.shape}) and updates ({updates_to_use.shape}). Skipping advantage modification.",
-                    stacklevel=2
+                    stacklevel=2,
                 )
+
+
 # =====================================================
+
 
 class CPPO(RLAlgorithm):
     """Proximal Policy Optimization (PPO) algorithm.
@@ -177,15 +185,15 @@ class CPPO(RLAlgorithm):
         max_grad_norm: float = 0.5,
         target_kl: Optional[float] = None,
         # === Parameters from Author Implementation ===
-        cvar_alpha: float = 0.9, # Corresponds to alpha in paper/author code
-        cvar_beta: float = 2800.0, # Corresponds to beta in paper/author code (used for lambda update)
+        cvar_alpha: float = 0.9,  # Corresponds to alpha in paper/author code
+        cvar_beta: float = 2800.0,  # Corresponds to beta in paper/author code (used for lambda update)
         nu_lr: float = 1e-3,
         lam_lr: float = 1e-3,
         nu_start: float = 0.0,
         lam_start: float = 0.5,
         nu_delay: float = 0.8,
         delay: float = 1.0,
-        cvar_clip_ratio: float = 0.05, # Clipping for the 'updates' term
+        cvar_clip_ratio: float = 0.05,  # Clipping for the 'updates' term
         # ============================================
         normalize_images: bool = True,
         update_epochs: int = 4,
@@ -269,15 +277,9 @@ class CPPO(RLAlgorithm):
         ), "Wrap models flag must be boolean value True or False."
 
         # CPPO specific assertions
-        assert isinstance(
-            cvar_alpha, float
-        ), "CVaR alpha must be a float."
-        assert (
-            0.0 < cvar_alpha <= 1.0
-        ), "CVaR alpha must be in the range (0, 1]."
-        assert isinstance(
-            cvar_beta, float
-        ), "CVaR beta must be a float."
+        assert isinstance(cvar_alpha, float), "CVaR alpha must be a float."
+        assert 0.0 < cvar_alpha <= 1.0, "CVaR alpha must be in the range (0, 1]."
+        assert isinstance(cvar_beta, float), "CVaR beta must be a float."
         # assert cvar_beta >= 0, "CVaR beta must be non-negative." # Role-dependent
 
         # New parameters for using RolloutBuffer
@@ -336,27 +338,41 @@ class CPPO(RLAlgorithm):
         self.nu_lr = nu_lr
         self.lam_lr = lam_lr
         self.nu = nu_start
-        self.cvarlam = lam_start # Renamed lambda to cvarlam to avoid conflict
+        self.cvarlam = lam_start  # Renamed lambda to cvarlam to avoid conflict
         self.nu_delay = nu_delay
         self.delay = delay
         self.cvar_clip_ratio = cvar_clip_ratio
         # Track sums for nu/lambda updates across an epoch/rollout
         self._nu_delta_sum = 0.0
-        self._bad_trajectory_count = 0 # Corresponds to bad_trajectory_num
-        self._total_trajectory_steps = 0 # Corresponds to trajectory_num
-        self._episode_returns = np.zeros(self.num_envs, dtype=np.float32) # Initialize episode returns for each env
+        self._bad_trajectory_count = 0  # Corresponds to bad_trajectory_num
+        self._total_trajectory_steps = 0  # Corresponds to trajectory_num
+        self._episode_returns = np.zeros(
+            self.num_envs, dtype=np.float32
+        )  # Initialize episode returns for each env
         # ==========================================================
 
         # === CVaR parameter assertions ===
-        assert isinstance(cvar_alpha, float) and 0 < cvar_alpha <= 1.0, "cvar_alpha must be in (0, 1]"
+        assert (
+            isinstance(cvar_alpha, float) and 0 < cvar_alpha <= 1.0
+        ), "cvar_alpha must be in (0, 1]"
         assert isinstance(cvar_beta, float), "cvar_beta must be float"
-        assert isinstance(nu_lr, float) and nu_lr >= 0, "nu_lr must be non-negative float"
-        assert isinstance(lam_lr, float) and lam_lr >= 0, "lam_lr must be non-negative float"
+        assert (
+            isinstance(nu_lr, float) and nu_lr >= 0
+        ), "nu_lr must be non-negative float"
+        assert (
+            isinstance(lam_lr, float) and lam_lr >= 0
+        ), "lam_lr must be non-negative float"
         assert isinstance(nu_start, float), "nu_start must be float"
-        assert isinstance(lam_start, float) and lam_start >= 0, "lam_start must be non-negative float"
-        assert isinstance(nu_delay, float) and 0 <= nu_delay <= 1.0, "nu_delay must be in [0, 1]"
+        assert (
+            isinstance(lam_start, float) and lam_start >= 0
+        ), "lam_start must be non-negative float"
+        assert (
+            isinstance(nu_delay, float) and 0 <= nu_delay <= 1.0
+        ), "nu_delay must be in [0, 1]"
         assert isinstance(delay, float) and delay >= 0, "delay must be non-negative"
-        assert isinstance(cvar_clip_ratio, float) and cvar_clip_ratio >= 0, "cvar_clip_ratio must be non-negative"
+        assert (
+            isinstance(cvar_clip_ratio, float) and cvar_clip_ratio >= 0
+        ), "cvar_clip_ratio must be non-negative"
         # =================================
 
         if actor_network is not None and critic_network is not None:
@@ -661,211 +677,6 @@ class CPPO(RLAlgorithm):
                 values.cpu().data.numpy(),
             )
 
-    def collect_rollouts(
-        self,
-        env: GymEnvType,
-        n_steps: int = None,
-    ) -> None:
-        """
-        Collect rollouts from the environment and store them in the rollout buffer.
-
-        :param env: The environment to collect rollouts from
-        :type env: GymEnvType
-        :param n_steps: Number of steps to collect, defaults to self.learn_step
-        :type n_steps: int, optional
-        """
-        if not self.use_rollout_buffer:
-            raise RuntimeError(
-                "collect_rollouts can only be used when use_rollout_buffer=True"
-            )
-
-        n_steps = n_steps or self.learn_step
-        self.rollout_buffer.reset()
-
-        # Initial reset
-        obs, info = env.reset()
-
-        self.hidden_state = (
-            self.get_initial_hidden_state(self.num_envs) if self.recurrent else None
-        )
-
-        current_hidden_state = self.hidden_state
-
-        # === Start of CPPO Update === #
-        # ================================================================ #
-        # Reset accumulators for next epoch/rollout
-        self._nu_delta_sum = 0.0
-        self._bad_trajectory_count = 0
-        self._total_trajectory_steps = 0
-        self.cvarlam = self.cvarlam + self.lam_lr * (self.cvar_beta - self.nu)
-
-        for _ in range(n_steps):
-            # Get action
-            if self.recurrent:
-                action, log_prob, _, value, next_hidden = self.get_action(
-                    obs,
-                    action_mask=info.get("action_mask", None),
-                    hidden_state=current_hidden_state,
-                )
-                self.hidden_state = next_hidden
-            else:
-                # No need for next_hidden in non-recurrent networks, so we're not even returning it
-                action, log_prob, _, value = self.get_action(
-                    obs, action_mask=info.get("action_mask", None)
-                )
-
-            # Execute action
-            next_obs, reward, done, truncated, next_info = env.step(action)
-            
-            # Accumulate rewards into ep_ret
-            self._episode_returns += np.asarray(reward, dtype=np.float32)
-
-
-            # Handle both single environment and vectorized environments terminal states
-            if isinstance(done, list) or isinstance(done, np.ndarray):
-                is_terminal = (
-                    np.logical_or(done, truncated)
-                    if isinstance(truncated, (list, np.ndarray))
-                    else done
-                )
-            else:
-                is_terminal = done or truncated
-
-            # Ensure shapes are correct (num_envs, ...) for rollout buffer. This isn't necessary by itself, but it's good for debugging.
-            reward_arr = np.asarray(reward, dtype=np.float32).reshape(-1) # Ensure reward is 1D array for calculations
-            is_terminal_arr = np.asarray(is_terminal, dtype=bool).reshape(-1) # Ensure is_terminal is 1D array
-            value_arr = np.asarray(value, dtype=np.float32).reshape(-1) # Ensure value is 1D array
-            log_prob_arr = np.asarray(log_prob, dtype=np.float32).reshape(-1) # Ensure log_prob is 1D array
-
-            # Calculate 'updates' term based on author's CPPO logic
-            # Condition for a "bad step" (from author's code: if ep_ret + v - r < nu)
-            # Ensure ep_ret used here is the current accumulated return for each environment
-            is_bad_step_arr = (self._episode_returns + value_arr - reward_arr) < self.nu
-            
-            # Initialize updates to zeros
-            updates = np.zeros_like(reward_arr, dtype=np.float32)
-
-            self._nu_delta_sum += np.sum(self._episode_returns + value_arr - reward_arr) # Sum over all environments
-
-            if np.any(is_bad_step_arr):
-                # Calculate potential update only for 'bad' steps for those specific environments
-                potential_updates_for_bad_steps = self.delay * self.cvarlam / (1.0 - self.cvar_alpha + 1e-8) * (self.nu - (self._episode_returns + value_arr - reward_arr))
-                
-                # Apply these potential updates only to the elements where is_bad_step_arr is True
-                updates[is_bad_step_arr] = potential_updates_for_bad_steps[is_bad_step_arr]
-
-                # Define the clipping threshold based on the absolute value and cvar_clip_ratio
-                _clip_threshold_values = np.abs(value_arr) * self.cvar_clip_ratio
-                
-                # Clip the updates only for the 'bad' steps
-                updates[is_bad_step_arr] = np.minimum(updates[is_bad_step_arr], _clip_threshold_values[is_bad_step_arr])
-
-
-            self.rollout_buffer.add(
-                obs=obs,
-                action=action,
-                reward=reward_arr, # Use the shaped reward
-                done=is_terminal_arr, # Use the shaped terminal flag
-                value=value_arr, # Use the shaped value
-                log_prob=log_prob_arr, # Use the shaped log_prob
-                update=updates, # Pass the calculated updates term
-                next_obs=next_obs,
-                hidden_state=current_hidden_state,
-            )
-
-            # Update epoch-level accumulators for nu/cvarlam updates
-            self._bad_trajectory_count += np.sum(is_bad_step_arr) # Sum over all environments
-            self._total_trajectory_steps += value_arr.size # Count total steps processed (num_envs)
-
-            # === Update nu and cvarlam based on collected stats (MOVED OUTSIDE LOOP) ===
-            # if self._total_trajectory_steps > 0:
-            #     nu_delta = self._nu_delta_sum / self._total_trajectory_steps
-            #     self.nu = nu_delta * self.nu_delay
-            # ================================================
-
-            # === End of CPPO Update === #
-            # ================================================================ #
-
-            # Reset hidden state and ep_ret for finished environments
-            if self.recurrent and np.any(is_terminal_arr):
-                # Create a mask for finished environments
-                finished_mask = is_terminal_arr.astype(bool)
-                # Get initial hidden states only for the finished environments
-                initial_hidden_states_for_reset = self.get_initial_hidden_state(
-                    self.num_envs
-                )
-
-                if isinstance(self.hidden_state, torch.Tensor):
-                    reset_states = initial_hidden_states_for_reset[finished_mask]
-                    if reset_states.shape[0] > 0:  # Only update if any finished
-                        self.hidden_state[finished_mask] = reset_states
-                elif isinstance(self.hidden_state, dict):
-                    for key in self.hidden_state:
-                        # initial_hidden_states_for_reset[key] has shape (1, num_envs, hidden_size)
-                        # finished_mask has shape (num_envs,)
-                        # Index along the num_envs dimension (dim 1)
-                        reset_states = initial_hidden_states_for_reset[key][
-                            :, finished_mask, :
-                        ]
-
-                        if (
-                            reset_states.shape[1] > 0
-                        ):  # Check num_envs dimension if any env finished
-                            # Assign to the correct slice along the num_envs dimension
-                            self.hidden_state[key][:, finished_mask, :] = reset_states
-
-            # Reset ep_ret for environments that just finished
-            self._episode_returns[is_terminal_arr] = 0.0
-
-            # Update the current hidden state for the next timestep
-            if self.recurrent:
-                current_hidden_state = self.hidden_state
-
-            # Update for next step
-            obs = next_obs
-            info = next_info
-        
-        # === Update nu based on collected stats (MOVED HERE - AFTER LOOP) ===
-        if self._total_trajectory_steps > 0:
-            nu_delta = self._nu_delta_sum / self._total_trajectory_steps
-            self.nu = nu_delta * self.nu_delay
-        # =====================================================================
-
-        # Compute advantages and returns
-        with torch.no_grad():
-            # Get value for last observation
-            if self.recurrent:
-                _, _, _, last_value, _ = self._get_action_and_values(
-                    obs, hidden_state=self.hidden_state
-                )
-            else:
-                _, _, _, last_value, _ = self._get_action_and_values(obs)
-
-            last_value = last_value.cpu().numpy()
-            last_done = np.atleast_1d(done)  # Ensure last_done has shape (num_envs,)
-
-        # Compute returns and advantages (advantage modification happens inside CPPORolloutBuffer)
-        self.rollout_buffer.compute_returns_and_advantages(
-            last_value=last_value, last_done=last_done
-        )
-
-        # # === Log CVaR Metrics ===
-        # if self.rollout_buffer.pos > 0 or self.rollout_buffer.full:
-        #     buffer_current_size = self.rollout_buffer.capacity if self.rollout_buffer.full else self.rollout_buffer.pos
-        #     # updates_in_buffer shape is (capacity, num_envs)
-        #     # We want the mean of the *actually stored* updates relevant to this rollout
-        #     relevant_updates = self.rollout_buffer.updates[:buffer_current_size].reshape(-1) # Flatten to get mean over all steps and envs
-        #     mean_updates_term = np.mean(relevant_updates) if relevant_updates.size > 0 else 0.0
-            
-        #     print(f"--- CVaR Metrics (End of Collect Rollouts) ---")
-        #     print(f"  Nu: {self.nu:.4f}")
-        #     print(f"  CVaR Lambda (cvarlam): {self.cvarlam:.4f}")
-        #     print(f"  Mean 'updates' term in buffer: {mean_updates_term:.4f}")
-        #     print(f"  Bad Trajectory Count: {self._bad_trajectory_count}")
-        #     print(f"  Total Trajectory Steps for Nu Update: {self._total_trajectory_steps}")
-        #     print(f"-----------------------------------------------")
-        # # =========================
-
     def learn(self, experiences: Union[ExperiencesType, None] = None) -> float:
         """Updates agent network parameters to learn from experiences.
 
@@ -1012,6 +823,21 @@ class CPPO(RLAlgorithm):
 
         mean_loss /= num_samples * self.update_epochs
         return mean_loss
+
+    # Usage Example: CVAR_PPO now uses the enhanced collect_rollouts functions
+    #
+    # For non-recurrent CVAR_PPO:
+    # completed_scores = collect_rollouts(agent, env, n_steps=2048, reset_on_collect=True)
+    #
+    # For recurrent CVAR_PPO:
+    # completed_scores = collect_rollouts_recurrent(agent, env, n_steps=2048, reset_on_collect=False)
+    #
+    # The enhanced functions automatically detect CVAR capabilities and:
+    # - Track episode returns using agent._episode_returns
+    # - Calculate CVaR update terms based on "bad steps"
+    # - Update nu and cvarlam parameters after collection
+    # - Use agent.rollout_buffer.add() with update terms
+    # - Support stateful collection with reset_on_collect parameter
 
     def _learn_from_rollout_buffer(self) -> float:
         """
