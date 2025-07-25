@@ -6,12 +6,10 @@ import numpy as np
 import torch
 import torch.optim as optim
 from gymnasium import spaces
-from regex import P
 from torch.nn.utils import clip_grad_norm_
 
-from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.components.rollout_buffer import RolloutBuffer
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
@@ -20,7 +18,6 @@ from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.value_networks import ValueNetwork
 
 # Import enhanced rollout collection functions
-from agilerl.rollouts.on_policy import collect_rollouts, collect_rollouts_recurrent
 from agilerl.typing import ArrayOrTensor, ExperiencesType, GymEnvType
 from agilerl.utils.algo_utils import (
     flatten_experiences,
