@@ -575,8 +575,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             attr.optimizer = wrapped_opt
             return attr
 
-        print(f"attr.state_dict(): {attr}")
-
         # Only wrap the model if its part of the computation graph
         return self.accelerator.prepare(attr) if attr.state_dict() else attr
 
