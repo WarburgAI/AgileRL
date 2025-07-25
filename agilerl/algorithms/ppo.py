@@ -772,10 +772,10 @@ class PPO(RLAlgorithm):
 
         metrics.update(
             {
-                "last_learn_time": self.last_learn_time,
-                "total_learn_time": self.total_learn_time,
-                "last_collection_time": self.last_collection_time,
-                "total_collection_time": self.total_collection_time,
+                "time/last_learn_time": self.last_learn_time,
+                "time/total_learn_time": self.total_learn_time,
+                "time/last_collection_time": self.last_collection_time,
+                "time/total_collection_time": self.total_collection_time,
                 **self.last_learn_time_metrics,
             }
         )
@@ -834,7 +834,7 @@ class PPO(RLAlgorithm):
                     + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lambda
                 )
             t_end_gae = time.time()
-            self.last_learn_time_metrics["gae_calculation_time"] = (
+            self.last_learn_time_metrics["time/gae_calculation_time"] = (
                 t_end_gae - t_start_gae
             )
 
@@ -884,8 +884,8 @@ class PPO(RLAlgorithm):
                         obs=batch_states, actions=batch_actions
                     )
                     t_end_forward = time.time()
-                    self.last_learn_time_metrics["forward_pass_time"] = (
-                        self.last_learn_time_metrics.get("forward_pass_time", 0.0)
+                    self.last_learn_time_metrics["time/forward_pass_time"] = (
+                        self.last_learn_time_metrics.get("time/forward_pass_time", 0.0)
                         + (t_end_forward - t_start_forward)
                     )
 
@@ -924,8 +924,10 @@ class PPO(RLAlgorithm):
                         pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
                     )
                     t_end_loss = time.time()
-                    self.last_learn_time_metrics["loss_calculation_time"] = (
-                        self.last_learn_time_metrics.get("loss_calculation_time", 0.0)
+                    self.last_learn_time_metrics["time/loss_calculation_time"] = (
+                        self.last_learn_time_metrics.get(
+                            "time/loss_calculation_time", 0.0
+                        )
                         + (t_end_loss - t_start_loss)
                     )
 
@@ -943,8 +945,8 @@ class PPO(RLAlgorithm):
 
                     self.optimizer.step()
                     t_end_backward = time.time()
-                    self.last_learn_time_metrics["backward_pass_time"] = (
-                        self.last_learn_time_metrics.get("backward_pass_time", 0.0)
+                    self.last_learn_time_metrics["time/backward_pass_time"] = (
+                        self.last_learn_time_metrics.get("time/backward_pass_time", 0.0)
                         + (t_end_backward - t_start_backward)
                     )
 
@@ -966,21 +968,21 @@ class PPO(RLAlgorithm):
 
         if num_updates > 0:
             metrics = {
-                "total_loss": total_loss_sum / num_updates,
-                "policy_loss": policy_loss_sum / num_updates,
-                "value_loss": value_loss_sum / num_updates,
-                "entropy_loss": entropy_loss_sum / num_updates,
-                "approx_kl": kl_sum / num_updates,
-                "clip_fraction": clipfrac_sum / num_updates,
+                "learn/total_loss": total_loss_sum / num_updates,
+                "learn/policy_loss": policy_loss_sum / num_updates,
+                "learn/value_loss": value_loss_sum / num_updates,
+                "learn/entropy_loss": entropy_loss_sum / num_updates,
+                "learn/approx_kl": kl_sum / num_updates,
+                "learn/clip_fraction": clipfrac_sum / num_updates,
             }
         else:
             metrics = {
-                "total_loss": 0.0,
-                "policy_loss": 0.0,
-                "value_loss": 0.0,
-                "entropy_loss": 0.0,
-                "approx_kl": 0.0,
-                "clip_fraction": 0.0,
+                "learn/total_loss": 0.0,
+                "learn/policy_loss": 0.0,
+                "learn/value_loss": 0.0,
+                "learn/entropy_loss": 0.0,
+                "learn/approx_kl": 0.0,
+                "learn/clip_fraction": 0.0,
             }
 
         return metrics
@@ -996,19 +998,19 @@ class PPO(RLAlgorithm):
             t_start_get_batch = time.time()
             buffer_td = self.rollout_buffer.get_tensor_batch(device=self.device)
             t_end_get_batch = time.time()
-            self.last_learn_time_metrics["get_tensor_batch_time"] = (
+            self.last_learn_time_metrics["time/get_tensor_batch_time"] = (
                 t_end_get_batch - t_start_get_batch
             )
 
         if buffer_td.is_empty():
             warnings.warn("Buffer data is empty. Skipping learning step.")
             return {
-                "total_loss": 0.0,
-                "policy_loss": 0.0,
-                "value_loss": 0.0,
-                "entropy_loss": 0.0,
-                "approx_kl": 0.0,
-                "clip_fraction": 0.0,
+                "learn/total_loss": 0.0,
+                "learn/policy_loss": 0.0,
+                "learn/value_loss": 0.0,
+                "learn/entropy_loss": 0.0,
+                "learn/approx_kl": 0.0,
+                "learn/clip_fraction": 0.0,
             }
 
         observations = buffer_td["observations"]
@@ -1018,7 +1020,7 @@ class PPO(RLAlgorithm):
         t_start_adv_norm = time.time()
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         t_end_adv_norm = time.time()
-        self.last_learn_time_metrics["advantage_normalization_time"] = (
+        self.last_learn_time_metrics["time/advantage_normalization_time"] = (
             t_end_adv_norm - t_start_adv_norm
         )
 
@@ -1080,8 +1082,8 @@ class PPO(RLAlgorithm):
 
                 new_log_prob_t = self.actor.action_log_prob(mb_actions)
                 t_end_forward = time.time()
-                self.last_learn_time_metrics["forward_pass_time"] = (
-                    self.last_learn_time_metrics.get("forward_pass_time", 0.0)
+                self.last_learn_time_metrics["time/forward_pass_time"] = (
+                    self.last_learn_time_metrics.get("time/forward_pass_time", 0.0)
                     + (t_end_forward - t_start_forward)
                 )
 
@@ -1112,8 +1114,8 @@ class PPO(RLAlgorithm):
                     + self.ent_coef * entropy_loss
                 )
                 t_end_loss = time.time()
-                self.last_learn_time_metrics["loss_calculation_time"] = (
-                    self.last_learn_time_metrics.get("loss_calculation_time", 0.0)
+                self.last_learn_time_metrics["time/loss_calculation_time"] = (
+                    self.last_learn_time_metrics.get("time/loss_calculation_time", 0.0)
                     + (t_end_loss - t_start_loss)
                 )
 
@@ -1133,8 +1135,8 @@ class PPO(RLAlgorithm):
                 clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
                 self.optimizer.step()
                 t_end_backward = time.time()
-                self.last_learn_time_metrics["backward_pass_time"] = (
-                    self.last_learn_time_metrics.get("backward_pass_time", 0.0)
+                self.last_learn_time_metrics["time/backward_pass_time"] = (
+                    self.last_learn_time_metrics.get("time/backward_pass_time", 0.0)
                     + (t_end_backward - t_start_backward)
                 )
 
@@ -1154,21 +1156,21 @@ class PPO(RLAlgorithm):
 
         if num_updates > 0:
             metrics = {
-                "total_loss": total_loss_sum / num_updates,
-                "policy_loss": policy_loss_sum / num_updates,
-                "value_loss": value_loss_sum / num_updates,
-                "entropy_loss": entropy_loss_sum / num_updates,
-                "approx_kl": kl_sum / num_updates,
-                "clip_fraction": clipfrac_sum / num_updates,
+                "learn/total_loss": total_loss_sum / num_updates,
+                "learn/policy_loss": policy_loss_sum / num_updates,
+                "learn/value_loss": value_loss_sum / num_updates,
+                "learn/entropy_loss": entropy_loss_sum / num_updates,
+                "learn/approx_kl": kl_sum / num_updates,
+                "learn/clip_fraction": clipfrac_sum / num_updates,
             }
         else:
             metrics = {
-                "total_loss": 0.0,
-                "policy_loss": 0.0,
-                "value_loss": 0.0,
-                "entropy_loss": 0.0,
-                "approx_kl": 0.0,
-                "clip_fraction": 0.0,
+                "learn/total_loss": 0.0,
+                "learn/policy_loss": 0.0,
+                "learn/value_loss": 0.0,
+                "learn/entropy_loss": 0.0,
+                "learn/approx_kl": 0.0,
+                "learn/clip_fraction": 0.0,
             }
 
         return metrics
@@ -1187,12 +1189,12 @@ class PPO(RLAlgorithm):
                 f"Buffer size {buffer_actual_size} is less than seq_len {seq_len}. Skipping BPTT learning step."
             )
             return {
-                "total_loss": 0.0,
-                "policy_loss": 0.0,
-                "value_loss": 0.0,
-                "entropy_loss": 0.0,
-                "approx_kl": 0.0,
-                "clip_fraction": 0.0,
+                "learn/total_loss": 0.0,
+                "learn/policy_loss": 0.0,
+                "learn/value_loss": 0.0,
+                "learn/entropy_loss": 0.0,
+                "learn/approx_kl": 0.0,
+                "learn/clip_fraction": 0.0,
             }
 
         # Normalize advantages globally once before epochs
@@ -1210,7 +1212,7 @@ class PPO(RLAlgorithm):
         else:
             warnings.warn("No advantages to normalize in BPTT pre-normalization step.")
         t_end_adv_norm = time.time()
-        self.last_learn_time_metrics["advantage_normalization_time"] = (
+        self.last_learn_time_metrics["time/advantage_normalization_time"] = (
             t_end_adv_norm - t_start_adv_norm
         )
 
@@ -1221,12 +1223,12 @@ class PPO(RLAlgorithm):
                 f"Not enough data in buffer ({buffer_actual_size} steps) to form sequences of length {seq_len}. Skipping BPTT."
             )
             return {
-                "total_loss": 0.0,
-                "policy_loss": 0.0,
-                "value_loss": 0.0,
-                "entropy_loss": 0.0,
-                "approx_kl": 0.0,
-                "clip_fraction": 0.0,
+                "learn/total_loss": 0.0,
+                "learn/policy_loss": 0.0,
+                "learn/value_loss": 0.0,
+                "learn/entropy_loss": 0.0,
+                "learn/approx_kl": 0.0,
+                "learn/clip_fraction": 0.0,
             }
 
         all_start_coords = []  # List of (env_idx, time_idx_in_env_rollout)
@@ -1237,12 +1239,12 @@ class PPO(RLAlgorithm):
                     f"Not enough data for any full chunks of length {seq_len}. Skipping BPTT."
                 )
                 return {
-                    "total_loss": 0.0,
-                    "policy_loss": 0.0,
-                    "value_loss": 0.0,
-                    "entropy_loss": 0.0,
-                    "approx_kl": 0.0,
-                    "clip_fraction": 0.0,
+                    "learn/total_loss": 0.0,
+                    "learn/policy_loss": 0.0,
+                    "learn/value_loss": 0.0,
+                    "learn/entropy_loss": 0.0,
+                    "learn/approx_kl": 0.0,
+                    "learn/clip_fraction": 0.0,
                 }
             for env_idx in range(self.num_envs):
                 for chunk_i in range(num_chunks_per_env):
@@ -1260,12 +1262,12 @@ class PPO(RLAlgorithm):
                 num_chunks_per_env = buffer_actual_size // seq_len
                 if num_chunks_per_env == 0:
                     return {
-                        "total_loss": 0.0,
-                        "policy_loss": 0.0,
-                        "value_loss": 0.0,
-                        "entropy_loss": 0.0,
-                        "approx_kl": 0.0,
-                        "clip_fraction": 0.0,
+                        "learn/total_loss": 0.0,
+                        "learn/policy_loss": 0.0,
+                        "learn/value_loss": 0.0,
+                        "learn/entropy_loss": 0.0,
+                        "learn/approx_kl": 0.0,
+                        "learn/clip_fraction": 0.0,
                     }  # Not enough for even one chunk
                 for env_idx in range(self.num_envs):
                     for chunk_i in range(num_chunks_per_env):
@@ -1282,12 +1284,12 @@ class PPO(RLAlgorithm):
         if not all_start_coords:
             warnings.warn("No BPTT sequences to sample. Skipping learning.")
             return {
-                "total_loss": 0.0,
-                "policy_loss": 0.0,
-                "value_loss": 0.0,
-                "entropy_loss": 0.0,
-                "approx_kl": 0.0,
-                "clip_fraction": 0.0,
+                "learn/total_loss": 0.0,
+                "learn/policy_loss": 0.0,
+                "learn/value_loss": 0.0,
+                "learn/entropy_loss": 0.0,
+                "learn/approx_kl": 0.0,
+                "learn/clip_fraction": 0.0,
             }
 
         sequences_per_minibatch = (
@@ -1326,8 +1328,10 @@ class PPO(RLAlgorithm):
                     )
                 )
                 t_end_get_batch = time.time()
-                self.last_learn_time_metrics["get_sequences_batch_time"] = (
-                    self.last_learn_time_metrics.get("get_sequences_batch_time", 0.0)
+                self.last_learn_time_metrics["time/get_sequences_batch_time"] = (
+                    self.last_learn_time_metrics.get(
+                        "time/get_sequences_batch_time", 0.0
+                    )
                     + (t_end_get_batch - t_start_get_batch)
                 )
 
@@ -1443,8 +1447,8 @@ class PPO(RLAlgorithm):
                         )
 
                 t_end_forward = time.time()
-                self.last_learn_time_metrics["bptt_forward_pass_time"] = (
-                    self.last_learn_time_metrics.get("bptt_forward_pass_time", 0.0)
+                self.last_learn_time_metrics["time/bptt_forward_pass_time"] = (
+                    self.last_learn_time_metrics.get("time/bptt_forward_pass_time", 0.0)
                     + (t_end_forward - t_start_forward)
                 )
 
@@ -1455,8 +1459,10 @@ class PPO(RLAlgorithm):
                     + self.ent_coef * (entropy_loss_total / seq_len)
                 )
                 t_end_loss = time.time()
-                self.last_learn_time_metrics["bptt_loss_calculation_time"] = (
-                    self.last_learn_time_metrics.get("bptt_loss_calculation_time", 0.0)
+                self.last_learn_time_metrics["time/bptt_loss_calculation_time"] = (
+                    self.last_learn_time_metrics.get(
+                        "time/bptt_loss_calculation_time", 0.0
+                    )
                     + (t_end_loss - t_start_loss)
                 )
 
@@ -1467,8 +1473,10 @@ class PPO(RLAlgorithm):
                 clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
                 self.optimizer.step()
                 t_end_backward = time.time()
-                self.last_learn_time_metrics["bptt_backward_pass_time"] = (
-                    self.last_learn_time_metrics.get("bptt_backward_pass_time", 0.0)
+                self.last_learn_time_metrics["time/bptt_backward_pass_time"] = (
+                    self.last_learn_time_metrics.get(
+                        "time/bptt_backward_pass_time", 0.0
+                    )
                     + (t_end_backward - t_start_backward)
                 )
 
@@ -1527,21 +1535,21 @@ class PPO(RLAlgorithm):
 
         if num_updates > 0:
             metrics = {
-                "total_loss": total_loss_sum / num_updates,
-                "policy_loss": policy_loss_sum / num_updates,
-                "value_loss": value_loss_sum / num_updates,
-                "entropy_loss": entropy_loss_sum / num_updates,
-                "approx_kl": kl_sum / num_updates,
-                "clip_fraction": clipfrac_sum / num_updates,
+                "learn/total_loss": total_loss_sum / num_updates,
+                "learn/policy_loss": policy_loss_sum / num_updates,
+                "learn/value_loss": value_loss_sum / num_updates,
+                "learn/entropy_loss": entropy_loss_sum / num_updates,
+                "learn/approx_kl": kl_sum / num_updates,
+                "learn/clip_fraction": clipfrac_sum / num_updates,
             }
         else:
             metrics = {
-                "total_loss": 0.0,
-                "policy_loss": 0.0,
-                "value_loss": 0.0,
-                "entropy_loss": 0.0,
-                "approx_kl": 0.0,
-                "clip_fraction": 0.0,
+                "learn/total_loss": 0.0,
+                "learn/policy_loss": 0.0,
+                "learn/value_loss": 0.0,
+                "learn/entropy_loss": 0.0,
+                "learn/approx_kl": 0.0,
+                "learn/clip_fraction": 0.0,
             }
 
         return metrics

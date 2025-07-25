@@ -864,9 +864,9 @@ class ICM_PPO(RLAlgorithm):
                 next_hidden,
             )
             t_end_intrinsic_reward = time.time()
-            self.last_learn_time_metrics["intrinsic_reward_calculation_time"] = (
+            self.last_learn_time_metrics["time/intrinsic_reward_calculation_time"] = (
                 self.last_learn_time_metrics.get(
-                    "intrinsic_reward_calculation_time", 0.0
+                    "time/intrinsic_reward_calculation_time", 0.0
                 )
                 + (t_end_intrinsic_reward - t_start_intrinsic_reward)
             )
@@ -1118,10 +1118,10 @@ class ICM_PPO(RLAlgorithm):
 
         metrics.update(
             {
-                "last_learn_time": self.last_learn_time,
-                "total_learn_time": self.total_learn_time,
-                "last_collection_time": self.last_collection_time,
-                "total_collection_time": self.total_collection_time,
+                "time/last_learn_time": self.last_learn_time,
+                "time/total_learn_time": self.total_learn_time,
+                "time/last_collection_time": self.last_collection_time,
+                "time/total_collection_time": self.total_collection_time,
                 **self.last_learn_time_metrics,
             }
         )
@@ -1158,22 +1158,22 @@ class ICM_PPO(RLAlgorithm):
             t_start_get_batch = time.time()
             buffer_td = self.rollout_buffer.get_tensor_batch(device=self.device)
             t_end_get_batch = time.time()
-            self.last_learn_time_metrics["get_tensor_batch_time"] = (
+            self.last_learn_time_metrics["time/get_tensor_batch_time"] = (
                 t_end_get_batch - t_start_get_batch
             )
 
         if buffer_td.is_empty():
             warnings.warn("Buffer data is empty. Skipping learning step.")
             return {
-                "total_loss": 0.0,
-                "policy_loss": 0.0,
-                "value_loss": 0.0,
-                "entropy_loss": 0.0,
-                "icm_total_loss": 0.0,
-                "icm_inverse_loss": 0.0,
-                "icm_forward_loss": 0.0,
-                "approx_kl": 0.0,
-                "clip_fraction": 0.0,
+                "learn/total_loss": 0.0,
+                "learn/policy_loss": 0.0,
+                "learn/value_loss": 0.0,
+                "learn/entropy_loss": 0.0,
+                "learn/icm_total_loss": 0.0,
+                "learn/icm_inverse_loss": 0.0,
+                "learn/icm_forward_loss": 0.0,
+                "learn/approx_kl": 0.0,
+                "learn/clip_fraction": 0.0,
             }
 
         observations = buffer_td["observations"]
@@ -1183,7 +1183,7 @@ class ICM_PPO(RLAlgorithm):
         t_start_adv_norm = time.time()
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         t_end_adv_norm = time.time()
-        self.last_learn_time_metrics["advantage_normalization_time"] = (
+        self.last_learn_time_metrics["time/advantage_normalization_time"] = (
             t_end_adv_norm - t_start_adv_norm
         )
 
@@ -1254,8 +1254,8 @@ class ICM_PPO(RLAlgorithm):
                     learn_by_bptt=False,
                 )
                 t_end_loss = time.time()
-                self.last_learn_time_metrics["loss_calculation_time"] = (
-                    self.last_learn_time_metrics.get("loss_calculation_time", 0.0)
+                self.last_learn_time_metrics["time/loss_calculation_time"] = (
+                    self.last_learn_time_metrics.get("time/loss_calculation_time", 0.0)
                     + (t_end_loss - t_start_loss)
                 )
 
@@ -1278,8 +1278,8 @@ class ICM_PPO(RLAlgorithm):
                     clip_grad_norm_(self.icm.parameters(), self.max_grad_norm)
                 self.optimizer.step()
                 t_end_backward = time.time()
-                self.last_learn_time_metrics["backward_pass_time"] = (
-                    self.last_learn_time_metrics.get("backward_pass_time", 0.0)
+                self.last_learn_time_metrics["time/backward_pass_time"] = (
+                    self.last_learn_time_metrics.get("time/backward_pass_time", 0.0)
                     + (t_end_backward - t_start_backward)
                 )
 
@@ -1319,27 +1319,27 @@ class ICM_PPO(RLAlgorithm):
 
         if num_updates > 0:
             metrics = {
-                "total_loss": total_loss_sum / num_updates,
-                "policy_loss": policy_loss_sum / num_updates,
-                "value_loss": value_loss_sum / num_updates,
-                "entropy_loss": entropy_loss_sum / num_updates,
-                "icm_total_loss": icm_total_loss_sum / num_updates,
-                "icm_inverse_loss": icm_i_loss_sum / num_updates,
-                "icm_forward_loss": icm_f_loss_sum / num_updates,
-                "approx_kl": kl_sum / num_updates,
-                "clip_fraction": clipfrac_sum / num_updates,
+                "learn/total_loss": total_loss_sum / num_updates,
+                "learn/policy_loss": policy_loss_sum / num_updates,
+                "learn/value_loss": value_loss_sum / num_updates,
+                "learn/entropy_loss": entropy_loss_sum / num_updates,
+                "learn/icm_total_loss": icm_total_loss_sum / num_updates,
+                "learn/icm_inverse_loss": icm_i_loss_sum / num_updates,
+                "learn/icm_forward_loss": icm_f_loss_sum / num_updates,
+                "learn/approx_kl": kl_sum / num_updates,
+                "learn/clip_fraction": clipfrac_sum / num_updates,
             }
         else:
             metrics = {
-                "total_loss": 0.0,
-                "policy_loss": 0.0,
-                "value_loss": 0.0,
-                "entropy_loss": 0.0,
-                "icm_total_loss": 0.0,
-                "icm_inverse_loss": 0.0,
-                "icm_forward_loss": 0.0,
-                "approx_kl": 0.0,
-                "clip_fraction": 0.0,
+                "learn/total_loss": 0.0,
+                "learn/policy_loss": 0.0,
+                "learn/value_loss": 0.0,
+                "learn/entropy_loss": 0.0,
+                "learn/icm_total_loss": 0.0,
+                "learn/icm_inverse_loss": 0.0,
+                "learn/icm_forward_loss": 0.0,
+                "learn/approx_kl": 0.0,
+                "learn/clip_fraction": 0.0,
             }
 
         return metrics
@@ -1388,7 +1388,7 @@ class ICM_PPO(RLAlgorithm):
         else:
             warnings.warn("No advantages to normalize in BPTT pre-normalization step.")
         t_end_adv_norm = time.time()
-        self.last_learn_time_metrics["advantage_normalization_time"] = (
+        self.last_learn_time_metrics["time/advantage_normalization_time"] = (
             t_end_adv_norm - t_start_adv_norm
         )
 
@@ -1399,15 +1399,15 @@ class ICM_PPO(RLAlgorithm):
                 f"Not enough data in buffer ({buffer_actual_size} steps) to form sequences of length {seq_len}. Skipping BPTT."
             )
             return {
-                "total_loss": 0.0,
-                "policy_loss": 0.0,
-                "value_loss": 0.0,
-                "entropy_loss": 0.0,
-                "icm_total_loss": 0.0,
-                "icm_inverse_loss": 0.0,
-                "icm_forward_loss": 0.0,
-                "approx_kl": 0.0,
-                "clip_fraction": 0.0,
+                "learn/total_loss": 0.0,
+                "learn/policy_loss": 0.0,
+                "learn/value_loss": 0.0,
+                "learn/entropy_loss": 0.0,
+                "learn/icm_total_loss": 0.0,
+                "learn/icm_inverse_loss": 0.0,
+                "learn/icm_forward_loss": 0.0,
+                "learn/approx_kl": 0.0,
+                "learn/clip_fraction": 0.0,
             }
 
         all_start_coords = []  # List of (env_idx, time_idx_in_env_rollout)
@@ -1418,15 +1418,15 @@ class ICM_PPO(RLAlgorithm):
                     f"Not enough data for any full chunks of length {seq_len}. Skipping BPTT."
                 )
                 return {
-                    "total_loss": 0.0,
-                    "policy_loss": 0.0,
-                    "value_loss": 0.0,
-                    "entropy_loss": 0.0,
-                    "icm_total_loss": 0.0,
-                    "icm_inverse_loss": 0.0,
-                    "icm_forward_loss": 0.0,
-                    "approx_kl": 0.0,
-                    "clip_fraction": 0.0,
+                    "learn/total_loss": 0.0,
+                    "learn/policy_loss": 0.0,
+                    "learn/value_loss": 0.0,
+                    "learn/entropy_loss": 0.0,
+                    "learn/icm_total_loss": 0.0,
+                    "learn/icm_inverse_loss": 0.0,
+                    "learn/icm_forward_loss": 0.0,
+                    "learn/approx_kl": 0.0,
+                    "learn/clip_fraction": 0.0,
                 }
             for env_idx in range(self.num_envs):
                 for chunk_i in range(num_chunks_per_env):
@@ -1444,15 +1444,15 @@ class ICM_PPO(RLAlgorithm):
                 num_chunks_per_env = buffer_actual_size // seq_len
                 if num_chunks_per_env == 0:
                     return {
-                        "total_loss": 0.0,
-                        "policy_loss": 0.0,
-                        "value_loss": 0.0,
-                        "entropy_loss": 0.0,
-                        "icm_total_loss": 0.0,
-                        "icm_inverse_loss": 0.0,
-                        "icm_forward_loss": 0.0,
-                        "approx_kl": 0.0,
-                        "clip_fraction": 0.0,
+                        "learn/total_loss": 0.0,
+                        "learn/policy_loss": 0.0,
+                        "learn/value_loss": 0.0,
+                        "learn/entropy_loss": 0.0,
+                        "learn/icm_total_loss": 0.0,
+                        "learn/icm_inverse_loss": 0.0,
+                        "learn/icm_forward_loss": 0.0,
+                        "learn/approx_kl": 0.0,
+                        "learn/clip_fraction": 0.0,
                     }  # Not enough for even one chunk
                 for env_idx in range(self.num_envs):
                     for chunk_i in range(num_chunks_per_env):
@@ -1469,15 +1469,15 @@ class ICM_PPO(RLAlgorithm):
         if not all_start_coords:
             warnings.warn("No BPTT sequences to sample. Skipping learning.")
             return {
-                "total_loss": 0.0,
-                "policy_loss": 0.0,
-                "value_loss": 0.0,
-                "entropy_loss": 0.0,
-                "icm_total_loss": 0.0,
-                "icm_inverse_loss": 0.0,
-                "icm_forward_loss": 0.0,
-                "approx_kl": 0.0,
-                "clip_fraction": 0.0,
+                "learn/total_loss": 0.0,
+                "learn/policy_loss": 0.0,
+                "learn/value_loss": 0.0,
+                "learn/entropy_loss": 0.0,
+                "learn/icm_total_loss": 0.0,
+                "learn/icm_inverse_loss": 0.0,
+                "learn/icm_forward_loss": 0.0,
+                "learn/approx_kl": 0.0,
+                "learn/clip_fraction": 0.0,
             }
 
         sequences_per_minibatch = (
@@ -1518,8 +1518,10 @@ class ICM_PPO(RLAlgorithm):
                     )
                 )
                 t_end_get_batch = time.time()
-                self.last_learn_time_metrics["get_sequences_batch_time"] = (
-                    self.last_learn_time_metrics.get("get_sequences_batch_time", 0.0)
+                self.last_learn_time_metrics["time/get_sequences_batch_time"] = (
+                    self.last_learn_time_metrics.get(
+                        "time/get_sequences_batch_time", 0.0
+                    )
                     + (t_end_get_batch - t_start_get_batch)
                 )
 
@@ -1581,8 +1583,10 @@ class ICM_PPO(RLAlgorithm):
                     old_values=mb_old_values_seq,
                 )
                 t_end_loss = time.time()
-                self.last_learn_time_metrics["bptt_loss_calculation_time"] = (
-                    self.last_learn_time_metrics.get("bptt_loss_calculation_time", 0.0)
+                self.last_learn_time_metrics["time/bptt_loss_calculation_time"] = (
+                    self.last_learn_time_metrics.get(
+                        "time/bptt_loss_calculation_time", 0.0
+                    )
                     + (t_end_loss - t_start_loss)
                 )
                 approx_kl_divs_minibatch_timesteps.append(loss_dict["approx_kl"])
@@ -1603,8 +1607,10 @@ class ICM_PPO(RLAlgorithm):
                     clip_grad_norm_(self.icm.parameters(), self.max_grad_norm)
                 self.optimizer.step()
                 t_end_backward = time.time()
-                self.last_learn_time_metrics["bptt_backward_pass_time"] = (
-                    self.last_learn_time_metrics.get("bptt_backward_pass_time", 0.0)
+                self.last_learn_time_metrics["time/bptt_backward_pass_time"] = (
+                    self.last_learn_time_metrics.get(
+                        "time/bptt_backward_pass_time", 0.0
+                    )
                     + (t_end_backward - t_start_backward)
                 )
 
@@ -1678,27 +1684,27 @@ class ICM_PPO(RLAlgorithm):
 
         if num_updates > 0:
             metrics = {
-                "total_loss": total_loss_sum / num_updates,
-                "policy_loss": policy_loss_sum / num_updates,
-                "value_loss": value_loss_sum / num_updates,
-                "entropy_loss": entropy_loss_sum / num_updates,
-                "icm_total_loss": icm_total_loss_sum / num_updates,
-                "icm_inverse_loss": icm_i_loss_sum / num_updates,
-                "icm_forward_loss": icm_f_loss_sum / num_updates,
-                "approx_kl": kl_sum / num_updates,
-                "clip_fraction": clipfrac_sum / num_updates,
+                "learn/total_loss": total_loss_sum / num_updates,
+                "learn/policy_loss": policy_loss_sum / num_updates,
+                "learn/value_loss": value_loss_sum / num_updates,
+                "learn/entropy_loss": entropy_loss_sum / num_updates,
+                "learn/icm_total_loss": icm_total_loss_sum / num_updates,
+                "learn/icm_inverse_loss": icm_i_loss_sum / num_updates,
+                "learn/icm_forward_loss": icm_f_loss_sum / num_updates,
+                "learn/approx_kl": kl_sum / num_updates,
+                "learn/clip_fraction": clipfrac_sum / num_updates,
             }
         else:
             metrics = {
-                "total_loss": 0.0,
-                "policy_loss": 0.0,
-                "value_loss": 0.0,
-                "entropy_loss": 0.0,
-                "icm_total_loss": 0.0,
-                "icm_inverse_loss": 0.0,
-                "icm_forward_loss": 0.0,
-                "approx_kl": 0.0,
-                "clip_fraction": 0.0,
+                "learn/total_loss": 0.0,
+                "learn/policy_loss": 0.0,
+                "learn/value_loss": 0.0,
+                "learn/entropy_loss": 0.0,
+                "learn/icm_total_loss": 0.0,
+                "learn/icm_inverse_loss": 0.0,
+                "learn/icm_forward_loss": 0.0,
+                "learn/approx_kl": 0.0,
+                "learn/clip_fraction": 0.0,
             }
 
         return metrics
@@ -1862,15 +1868,15 @@ class ICM_PPO(RLAlgorithm):
             )
 
             return {
-                "loss": loss,
-                "policy_loss": policy_loss_avg_over_seq,
-                "value_loss": value_loss_avg_over_seq,
-                "entropy_loss": entropy_loss_avg_over_seq,
-                "approx_kl": approx_kl,
-                "clip_fraction": clip_fraction,
-                "icm_total_loss": icm_total_loss_avg_over_seq,
-                "icm_i_loss": icm_i_loss_avg_over_seq,
-                "icm_f_loss": icm_f_loss_avg_over_seq,
+                "learn/loss": loss,
+                "learn/policy_loss": policy_loss_avg_over_seq,
+                "learn/value_loss": value_loss_avg_over_seq,
+                "learn/entropy_loss": entropy_loss_avg_over_seq,
+                "learn/approx_kl": approx_kl,
+                "learn/clip_fraction": clip_fraction,
+                "learn/icm_total_loss": icm_total_loss_avg_over_seq,
+                "learn/icm_i_loss": icm_i_loss_avg_over_seq,
+                "learn/icm_f_loss": icm_f_loss_avg_over_seq,
             }
         else:
             # Get values and next hidden state (which we ignore in flat learning)
@@ -1935,15 +1941,15 @@ class ICM_PPO(RLAlgorithm):
             )
 
             return {
-                "loss": loss,
-                "policy_loss": policy_loss,
-                "value_loss": value_loss,
-                "entropy_loss": entropy_loss,
-                "approx_kl": approx_kl,
-                "clip_fraction": clip_fraction,
-                "icm_total_loss": icm_total_loss,
-                "icm_i_loss": icm_i_loss,
-                "icm_f_loss": icm_f_loss,
+                "learn/loss": loss,
+                "learn/policy_loss": policy_loss,
+                "learn/value_loss": value_loss,
+                "learn/entropy_loss": entropy_loss,
+                "learn/approx_kl": approx_kl,
+                "learn/clip_fraction": clip_fraction,
+                "learn/icm_total_loss": icm_total_loss,
+                "learn/icm_i_loss": icm_i_loss,
+                "learn/icm_f_loss": icm_f_loss,
             }
 
     def get_intrinsic_reward(
