@@ -298,6 +298,17 @@ class Mutations:
         )
         self.mut_options, self.mut_proba = self._get_mutations_options()
 
+        # Track current step for logging
+        self.current_step = 0
+
+    def set_step(self, step: int) -> None:
+        """Set the current step for logging purposes.
+
+        :param step: Current training step
+        :type step: int
+        """
+        self.current_step = step
+
     def mutation(
         self, population: PopulationType, pre_training_mut: bool = False
     ) -> PopulationType:
@@ -332,6 +343,27 @@ class Mutations:
 
         mutated_population = []
         for mutation, individual in zip(mutation_choice, population):
+            # Log all hyperparameters for each individual if agent_run_manager is available
+            if self.agent_run_manager is not None and hasattr(
+                individual, "original_id"
+            ):
+                hp_config = individual.registry.hp_config
+                if hp_config:
+                    hp_log_data = {}
+                    for attr_name, param_config in hp_config.hyperparameters.items():
+                        current_value = getattr(individual, attr_name, None)
+                        if current_value is not None:
+                            hp_log_data[f"hp_{attr_name}"] = (
+                                float(current_value)
+                                if isinstance(current_value, (int, float, np.number))
+                                else current_value
+                            )
+
+                    if hp_log_data:
+                        self.agent_run_manager.log_agent_metrics(
+                            individual.original_id, hp_log_data, self.current_step
+                        )
+
             individual = mutation(individual)  # Call sampled mutation for individual
             individual.mutation_hook()  # Call hooks specified by user
 
@@ -345,6 +377,15 @@ class Mutations:
         :param individual: Individual agent from population
         :type individual:
         """
+        # Log no mutation to individual agent run if available
+        if self.agent_run_manager is not None and hasattr(individual, "original_id"):
+            log_data = {
+                "mutation_type": "none",
+            }
+            self.agent_run_manager.log_agent_metrics(
+                individual.original_id, log_data, self.current_step
+            )
+
         individual.mut = "None"  # No mutation
         return individual
 
@@ -421,6 +462,17 @@ class Mutations:
 
         setattr(individual, mutate_attr, new_value)
 
+        # Log hyperparameter mutation type to individual agent run if available
+        if self.agent_run_manager is not None and hasattr(individual, "original_id"):
+            log_data = {
+                "mutation_type": "hyperparameter",
+                "mutation_parameter": mutate_attr,
+            }
+
+            self.agent_run_manager.log_agent_metrics(
+                individual.original_id, log_data, self.current_step
+            )
+
         # Reinitialize optimizer if mutated learning rate
         if mutate_attr in individual.get_lr_names():
             optimizer_configs = individual.registry.optimizers
@@ -488,6 +540,20 @@ class Mutations:
 
             setattr(individual, network_group.eval_network, eval_module)
 
+        # Log activation mutation to individual agent run if available
+        if (
+            self.agent_run_manager is not None
+            and hasattr(individual, "original_id")
+            and not no_activation
+        ):
+            log_data = {
+                "mutation_type": "activation",
+                "activation_selection": str(self.activation_selection),
+            }
+            self.agent_run_manager.log_agent_metrics(
+                individual.original_id, log_data, self.current_step
+            )
+
         individual.reinit_optimizers()  # Reinitialize optimizer
         individual.mut = "act" if not no_activation else "None"
         return individual
@@ -536,6 +602,17 @@ class Mutations:
                     offspring_policy.state_dict(), strict=False
                 )
                 self._to_device_and_set_individual(individual, shared, offspring_shared)
+
+        # Log parameter mutation to individual agent run if available
+        if self.agent_run_manager is not None and hasattr(individual, "original_id"):
+            log_data = {
+                "mutation_type": "parameter",
+                "mutation_sd": self.mutation_sd,
+            }
+
+            self.agent_run_manager.log_agent_metrics(
+                individual.original_id, log_data, self.current_step
+            )
 
         individual.reinit_optimizers()  # Reinitialize optimizer
         individual.mut = "param"
@@ -837,6 +914,18 @@ class Mutations:
                 self._to_device_and_set_individual(individual, name, offspring)
 
         individual.mutation_hook()  # Apply mutation hook
+
+        # Log architecture mutation to individual agent run if available
+        if self.agent_run_manager is not None and hasattr(individual, "original_id"):
+            log_data = {
+                "mutation_type": "architecture",
+                "architecture_method": str(applied_mutation),
+                "new_layer_prob": self.new_layer_prob,
+            }
+            self.agent_run_manager.log_agent_metrics(
+                individual.original_id, log_data, self.current_step
+            )
+
         individual.reinit_optimizers()  # Reinitialize optimizer
         individual.mut = applied_mutation or "None"
 
@@ -951,6 +1040,18 @@ class Mutations:
             self._to_device_and_set_individual(individual, name, offspring_eval)
 
         individual.mutation_hook()  # Apply mutation hook
+
+        # Log architecture mutation to individual agent run if available
+        if self.agent_run_manager is not None and hasattr(individual, "original_id"):
+            log_data = {
+                "mutation_type": "architecture",
+                "architecture_method": str(sampled_mutation),
+                "new_layer_prob": self.new_layer_prob,
+            }
+            self.agent_run_manager.log_agent_metrics(
+                individual.original_id, log_data, self.current_step
+            )
+
         individual.reinit_optimizers()  # Reinitialize optimizer
         individual.mut = sampled_mutation or "None"
 
