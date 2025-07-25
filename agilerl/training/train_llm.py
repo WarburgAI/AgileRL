@@ -152,11 +152,13 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]
         )
 
     total_steps = 0
+
     # calling env.reset() supplies the first batch of training data
     prompts = env.reset(reset_dataloaders=True)
     for i in range(training_steps):
         agent_metrics_dict = {}
         for agent_idx, agent in enumerate(pop):
+            agent.set_reference_policy(env.num_dataset_passes)
             completion_ids, action_masks = agent.get_action(prompts)
             completion_lengths = np.mean([x.shape[1] for x in completion_ids])
 
@@ -237,7 +239,7 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]
                     accelerator.wait_for_everyone()
         else:
             if (i + 1) % max_steps == 0:
-                save_llm_checkpoint(agent, elite_path, i + 1)
+                save_llm_checkpoint(agent, elite_path)
 
         if wb and (accelerator is None or accelerator.is_main_process):
             wandb_dict = {
@@ -364,18 +366,22 @@ Effective learning batch_size: {data_increment} * {init_hp["BATCH_SIZE_PER_GPU"]
         agents = [agent.index for agent in pop]
         num_steps = [agent.steps[-1] for agent in pop]
         muts = [agent.mut for agent in pop]
-        print(
-            f"""
-            --- Global Steps {total_steps} ---
-            Fitness:\t\t{fitness}
-            Score:\t\t{agg_metrics[2]}
-            5 fitness avgs:\t{avg_fitness}
-            10 score avgs:\t{avg_score}
-            Agents:\t\t{agents}
-            Steps:\t\t{num_steps}
-            Mutations:\t\t{muts}
-            """,
-            end="\r",
+
+        banner_text = f"Global Steps {total_steps}"
+        banner_width = max(len(banner_text) + 8, 35)
+        border = "=" * banner_width
+        centered_text = f"{banner_text}".center(banner_width)
+        pbar.write(
+            f"{border}\n"
+            f"{centered_text}\n"
+            f"{border}\n"
+            f"Fitness:\t\t{fitness}\n"
+            f"Score:\t\t{agg_metrics[2]}\n"
+            f"5 fitness avgs:\t{avg_fitness}\n"
+            f"10 score avgs:\t{avg_score}\n"
+            f"Agents:\t\t{agents}\n"
+            f"Steps:\t\t{num_steps}\n"
+            f"Mutations:\t\t{muts}"
         )
 
     if accelerator is not None:

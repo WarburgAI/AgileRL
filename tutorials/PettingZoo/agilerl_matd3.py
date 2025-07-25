@@ -146,6 +146,8 @@ if __name__ == "__main__":
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         pop_episode_scores = []
         for agent in pop:  # Loop through population
+            agent.set_training_mode(True)
+
             obs, info = env.reset()  # Reset environment at start of episode
             scores = np.zeros(num_envs)
             completed_episode_scores = []
@@ -158,13 +160,7 @@ if __name__ == "__main__":
             for idx_step in range(evo_steps // num_envs):
 
                 # Get next action from agent
-                cont_actions, discrete_action = agent.get_action(
-                    obs=obs, training=True, infos=info
-                )
-                if agent.discrete_actions:
-                    action = discrete_action
-                else:
-                    action = cont_actions
+                action, raw_action = agent.get_action(obs=obs, infos=info)
 
                 # Act in environment
                 next_obs, reward, termination, truncation, info = env.step(action)
@@ -183,7 +179,7 @@ if __name__ == "__main__":
                 # Save experiences to replay buffer
                 memory.save_to_memory(
                     obs,
-                    cont_actions,
+                    raw_action,
                     reward,
                     next_obs,
                     termination,

@@ -6,7 +6,7 @@ import torch
 from pettingzoo.mpe import simple_speaker_listener_v4
 from PIL import Image, ImageDraw
 
-from agilerl.algorithms.matd3 import MATD3
+from agilerl.algorithms import MATD3
 
 
 # Define function to return image
@@ -34,22 +34,6 @@ if __name__ == "__main__":
         continuous_actions=True, render_mode="rgb_array"
     )
     env.reset()
-    try:
-        state_dim = [env.observation_space(agent).n for agent in env.agents]
-        one_hot = True
-    except Exception:
-        state_dim = [env.observation_space(agent).shape for agent in env.agents]
-        one_hot = False
-    try:
-        action_dim = [env.action_space(agent).n for agent in env.agents]
-        discrete_actions = True
-        max_action = None
-        min_action = None
-    except Exception:
-        action_dim = [env.action_space(agent).shape[0] for agent in env.agents]
-        discrete_actions = False
-        max_action = [env.action_space(agent).high for agent in env.agents]
-        min_action = [env.action_space(agent).low for agent in env.agents]
 
     # Append number of agents and agent IDs to the initial hyperparameter dictionary
     n_agents = env.num_agents
@@ -77,25 +61,19 @@ if __name__ == "__main__":
 
     # Test loop for inference
     for ep in range(episodes):
-        state, info = env.reset()
+        obs, info = env.reset()
         agent_reward = {agent_id: 0 for agent_id in agent_ids}
         score = 0
         for _ in range(max_steps):
             # Get next action from agent
-            cont_actions, discrete_action = matd3.get_action(
-                state, training=False, infos=info
-            )
-            if matd3.discrete_actions:
-                action = discrete_action
-            else:
-                action = cont_actions
+            action, _ = matd3.get_action(obs, infos=info)
 
             # Save the frame for this step and append to frames list
             frame = env.render()
             frames.append(_label_with_episode_number(frame, episode_num=ep))
 
             # Take action in environment
-            state, reward, termination, truncation, info = env.step(
+            obs, reward, termination, truncation, info = env.step(
                 {agent: a.squeeze() for agent, a in action.items()}
             )
 

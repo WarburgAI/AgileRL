@@ -1,6 +1,7 @@
 import os
 import random
 import shutil
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
@@ -150,14 +151,28 @@ class DummyAgentOnPolicy(DummyAgentOffPolicy):
         self.actor.scale_action = lambda x: x
         self.actor.action_space = self.action_space
 
+        self.registry = MagicMock()
+        self.rollout_buffer = MagicMock()
+        self.rollout_buffer.reset.side_effect = lambda: None
+        self.rollout_buffer.add.side_effect = lambda *args, **kwargs: None
+        self.registry.policy.side_effect = lambda: "actor"
+        self.use_rollout_buffer = False
+        self.num_envs = 2
+
     def learn(self, *args, **kwargs):
         return random.random()
 
     def get_action(self, *args, **kwargs):
         return tuple(np.random.randn(self.action_size) for _ in range(4))
 
+    def _get_action_and_values(self, *args, **kwargs):
+        return tuple(torch.randn(self.action_size) for _ in range(5))
+
     def test(self, env, swap_channels, max_steps, loop):
         return super().test(env, swap_channels, max_steps, loop)
+
+    def preprocess_observation(self, obs):
+        return obs
 
     def save_checkpoint(self, path):
         return super().save_checkpoint(path)
@@ -261,23 +276,39 @@ class DummyMultiAgent(DummyAgentOffPolicy):
         self.lr_actor = 0.001
         self.lr_critic = 0.01
         self.lr = 0.01
-        self.discrete_actions = False
         self.num_envs = 1
         self.on_policy = on_policy
-        self.actors = [MagicMock() for _ in range(2)]
-        self.actors[0].squash_output = False
-        self.actors[0].scale_action = lambda x: x
-        self.actors[1].squash_output = False
-        self.actors[1].scale_action = lambda x: x
-        self.action_space = Dict(
+        self.actors = {
+            "agent_0": MagicMock(),
+            "other_agent_0": MagicMock(),
+        }
+        self.actors["agent_0"].squash_output = False
+        self.actors["agent_0"].scale_action = lambda x: x
+        self.actors["other_agent_0"].squash_output = False
+        self.actors["other_agent_0"].scale_action = lambda x: x
+        self.possible_action_spaces = Dict(
             {
                 "agent_0": Discrete(2),
-                "other_agent_0": Discrete(2),
+                "other_agent_0": Box(0, 1, (2,)),
             }
         )
+        self.possible_observation_spaces = Dict(
+            {
+                "agent_0": Box(0, 1, env.state_dims),
+                "other_agent_0": Box(0, 1, env.state_dims),
+            }
+        )
+        self.action_space = deepcopy(self.possible_action_spaces)
+        self.observation_space = deepcopy(self.possible_observation_spaces)
 
-    def get_homo_id(self, agent_id: str) -> str:
+        self.registry = MagicMock()
+        self.registry.policy.side_effect = lambda: "actors"
+
+    def get_group_id(self, agent_id: str) -> str:
         return agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
+
+    def has_grouped_agents(self) -> bool:
+        return True
 
     def get_action(self, *args, **kwargs):
         output_dict = {
@@ -286,13 +317,14 @@ class DummyMultiAgent(DummyAgentOffPolicy):
         }
         if self.on_policy:
             return output_dict, output_dict, output_dict, output_dict
-        return output_dict, None
+
+        return output_dict, output_dict
 
     def learn(self, experiences):
         if self.on_policy:
             return {
-                "agent": (random.random()),
-                "other_agent": (random.random()),
+                "agent_0": (random.random()),
+                "other_agent_0": (random.random()),
             }
         return {
             "agent_0": (random.random(), random.random()),
@@ -329,10 +361,10 @@ class DummyMultiAgent(DummyAgentOffPolicy):
     def reset_action_noise(self, *args, **kwargs):
         return
 
-    def assemble_homogeneous_outputs(self, agent_outputs, vect_dim):
+    def assemble_grouped_outputs(self, agent_outputs, vect_dim):
         return {
-            "agent": np.random.randn(vect_dim, self.action_size),
-            "other_agent": np.random.randn(vect_dim, self.action_size),
+            "agent_0": np.random.randn(vect_dim, self.action_size),
+            "other_agent_0": np.random.randn(vect_dim, self.action_size),
         }
 
     def extract_inactive_agents(self, obs):
@@ -697,6 +729,11 @@ def mocked_agent_on_policy(env, algo):
     mock_agent.unwrap_models.side_effect = lambda *args, **kwargs: None
     mock_agent.algo = "PPO"
 
+    mock_agent.registry = MagicMock()
+    mock_agent.registry.policy = lambda: "actor"
+    mock_agent.actor = MagicMock()
+    mock_agent.actor.squash_output = False
+
     return mock_agent
 
 
@@ -743,16 +780,28 @@ def mocked_multi_agent(multi_env, algo):
     mock_agent.fitness = []
     mock_agent.mut = "mutation"
     mock_agent.index = 1
-    mock_agent.discrete_actions = False
-    mock_agent.action_space = Dict(
+    mock_agent.possible_action_spaces = Dict(
         {
-            "agent_0": multi_env.action_space("agent_0"),
-            "other_agent_0": multi_env.action_space("other_agent_0"),
+            agent_id: multi_env.action_space(agent_id)
+            for agent_id in mock_agent.agent_ids
         }
     )
-    mock_agent.get_homo_id.side_effect = lambda x: (
+    mock_agent.possible_observation_spaces = Dict(
+        {
+            agent_id: multi_env.observation_space(agent_id)
+            for agent_id in mock_agent.agent_ids
+        }
+    )
+    mock_agent.action_space = deepcopy(mock_agent.possible_action_spaces)
+    mock_agent.observation_space = deepcopy(mock_agent.possible_observation_spaces)
+
+    mock_agent.get_group_id.side_effect = lambda x: (
         x.rsplit("_", 1)[0] if isinstance(x, str) else x
     )
+    mock_agent.registry = MagicMock()
+    mock_agent.registry.policy.side_effect = lambda: "actors"
+    mock_agent.has_grouped_agents.side_effect = lambda: algo == IPPO
+    mock_agent.actors = {agent_id: MagicMock() for agent_id in mock_agent.agent_ids}
 
     def get_action(*args, **kwargs):
         out = {
@@ -761,17 +810,14 @@ def mocked_multi_agent(multi_env, algo):
         }
         if algo == IPPO:
             return out, out, out, out
-        return out, None
-
-    def extract_inactive_agents(obs):
-        return {}, obs
+        return out, out
 
     mock_agent.get_action.side_effect = get_action
     mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
     if algo == IPPO:
         mock_agent.learn.side_effect = lambda experiences: {
-            "agent": random.random(),
-            "other_agent": random.random(),
+            "agent_0": random.random(),
+            "other_agent_0": random.random(),
         }
     else:
         mock_agent.learn.side_effect = lambda experiences: {
@@ -782,7 +828,6 @@ def mocked_multi_agent(multi_env, algo):
     mock_agent.load_checkpoint.side_effect = lambda *args, **kwargs: None
     mock_agent.wrap_models.side_effect = lambda *args, **kwargs: None
     mock_agent.unwrap_models.side_effect = lambda *args, **kwargs: None
-    mock_agent.extract_inactive_agents.side_effect = extract_inactive_agents
     if algo != IPPO:
         mock_agent.reset_action_noise.side_effect = lambda *args, **kwargs: None
     mock_agent.algo = {MADDPG: "MADDPG", MATD3: "MATD3", IPPO: "IPPO"}[algo]
@@ -2199,9 +2244,16 @@ def test_train_on_policy_tourn_mut_calls(
 
 
 @pytest.mark.parametrize(
-    "state_size, action_size, vect", [((6,), 2, True), ((6,), 2, False)]
+    "state_size, action_size, vect, use_rollout_buffer",
+    [((6,), 2, True, True), ((6,), 2, False, False)],
 )
-def test_train_on_policy(env, population_on_policy, tournament, mutations):
+def test_train_on_policy(
+    env, population_on_policy, tournament, mutations, use_rollout_buffer
+):
+    if use_rollout_buffer:
+        for agent in population_on_policy:
+            agent.use_rollout_buffer = True
+
     pop, pop_fitnesses = train_on_policy(
         env,
         "env_name",
@@ -2210,8 +2262,8 @@ def test_train_on_policy(env, population_on_policy, tournament, mutations):
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
+        max_steps=256,
+        evo_steps=256,
         eval_loop=1,
         tournament=tournament,
         mutation=mutations,
@@ -3298,10 +3350,7 @@ def test_train_multi_save_elite(
     on_policy,
     accelerator_flag,
 ):
-    if accelerator_flag:
-        accelerator = Accelerator()
-    else:
-        accelerator = None
+    accelerator = Accelerator() if accelerator_flag else None
     elite_path = "elite"
     pop, pop_fitnesses = train_multi_agent_off_policy(
         multi_env,
@@ -3379,10 +3428,7 @@ def test_train_multi_save_checkpoint(
     accelerator_flag,
     tmpdir,
 ):
-    if accelerator_flag:
-        accelerator = Accelerator()
-    else:
-        accelerator = None
+    accelerator = Accelerator() if accelerator_flag else None
     checkpoint_path = str(Path(tmpdir) / "checkpoint")
     pop, pop_fitnesses = train_multi_agent_off_policy(
         multi_env,
@@ -3421,10 +3467,7 @@ def test_train_multi_save_checkpoint_on_policy(
     accelerator_flag,
     tmpdir,
 ):
-    if accelerator_flag:
-        accelerator = Accelerator()
-    else:
-        accelerator = None
+    accelerator = Accelerator() if accelerator_flag else None
     checkpoint_path = str(Path(tmpdir) / "checkpoint")
     pop, pop_fitnesses = train_multi_agent_on_policy(
         multi_env,

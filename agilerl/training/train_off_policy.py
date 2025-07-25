@@ -9,7 +9,6 @@ import wandb
 from accelerate import Accelerator
 from tensordict import TensorDictBase
 from torch.utils.data import DataLoader
-from tqdm import trange
 
 from agilerl.algorithms import DDPG, DQN, TD3, RainbowDQN
 from agilerl.algorithms.core.base import RLAlgorithm
@@ -24,6 +23,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
+    default_progress_bar,
     init_wandb,
     save_population_checkpoint,
     tournament_selection_and_mutation,
@@ -66,6 +66,7 @@ def train_off_policy(
     verbose: bool = True,
     accelerator: Optional[Accelerator] = None,
     wandb_api_key: Optional[str] = None,
+    wandb_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Tuple[PopulationType, List[List[float]]]:
     """The general online RL training function. Returns trained population of agents
     and their fitnesses.
@@ -135,7 +136,8 @@ def train_off_policy(
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
     :param wandb_api_key: API key for Weights & Biases, defaults to None
-    :type wandb_api_key: str, optional
+    :param wandb_kwargs: Additional kwargs to pass to wandb.init()
+    :type wand_kwargs: dict, optional
     """
     assert isinstance(
         algo, str
@@ -169,14 +171,17 @@ def train_off_policy(
         )
 
     if wb:
-        init_wandb(
-            algo=algo,
-            env_name=env_name,
-            init_hyperparams=INIT_HP,
-            mutation_hyperparams=MUT_P,
-            wandb_api_key=wandb_api_key,
-            accelerator=accelerator,
-        )
+        init_wandb_kwargs = {
+            "algo": algo,
+            "env_name": env_name,
+            "init_hyperparams": INIT_HP,
+            "mutation_hyperparams": MUT_P,
+            "wandb_api_key": wandb_api_key,
+            "accelerator": accelerator,
+        }
+        if wandb_kwargs is not None:
+            init_wandb_kwargs.update(wandb_kwargs)
+        init_wandb(**init_wandb_kwargs)
 
     # Detect if environment is vectorised
     if hasattr(env, "num_envs"):
@@ -210,17 +215,8 @@ def train_off_policy(
     else:
         print("\nTraining...")
 
-    bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-    if accelerator is not None:
-        pbar = trange(
-            max_steps,
-            unit="step",
-            bar_format=bar_format,
-            ascii=True,
-            disable=not accelerator.is_local_main_process,
-        )
-    else:
-        pbar = trange(max_steps, unit="step", bar_format=bar_format, ascii=True)
+    # Format progress bar
+    pbar = default_progress_bar(max_steps, accelerator)
 
     pop_loss = [[] for _ in pop]
     pop_fitnesses = []
@@ -541,20 +537,22 @@ def train_off_policy(
             agents = [agent.index for agent in pop]
             num_steps = [agent.steps[-1] for agent in pop]
             muts = [agent.mut for agent in pop]
-            pbar.update(0)
 
-            print(
-                f"""
-                --- Global Steps {total_steps} ---
-                Fitness:\t\t{fitness}
-                Score:\t\t{mean_scores}
-                5 fitness avgs:\t{avg_fitness}
-                10 score avgs:\t{avg_score}
-                Agents:\t\t{agents}
-                Steps:\t\t{num_steps}
-                Mutations:\t\t{muts}
-                """,
-                end="\r",
+            banner_text = f"Global Steps {total_steps}"
+            banner_width = max(len(banner_text) + 8, 35)
+            border = "=" * banner_width
+            centered_text = f"{banner_text}".center(banner_width)
+            pbar.write(
+                f"{border}\n"
+                f"{centered_text}\n"
+                f"{border}\n"
+                f"Fitness:\t\t{fitness}\n"
+                f"Score:\t\t{mean_scores}\n"
+                f"5 fitness avgs:\t{avg_fitness}\n"
+                f"10 score avgs:\t{avg_score}\n"
+                f"Agents:\t\t{agents}\n"
+                f"Steps:\t\t{num_steps}\n"
+                f"Mutations:\t\t{muts}"
             )
 
         # Save model checkpoint

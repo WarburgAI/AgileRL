@@ -9,7 +9,6 @@ import wandb
 from accelerate import Accelerator
 from pettingzoo import ParallelEnv
 from torch.utils.data import DataLoader
-from tqdm import trange
 
 from agilerl.algorithms import MADDPG, MATD3
 from agilerl.components.data import ReplayDataset
@@ -19,6 +18,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
+    default_progress_bar,
     init_wandb,
     save_population_checkpoint,
     tournament_selection_and_mutation,
@@ -143,7 +143,6 @@ def train_multi_agent_off_policy(
         )
 
     start_time = time.time()
-
     if wb:
         init_wandb(
             algo=algo,
@@ -184,24 +183,8 @@ def train_multi_agent_off_policy(
     else:
         print("\nTraining...")
 
-    bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-    if accelerator is not None:
-        pbar = trange(
-            max_steps,
-            unit="step",
-            bar_format=bar_format,
-            ascii=True,
-            dynamic_ncols=True,
-            disable=not accelerator.is_local_main_process,
-        )
-    else:
-        pbar = trange(
-            max_steps,
-            unit="step",
-            bar_format=bar_format,
-            ascii=True,
-            dynamic_ncols=True,
-        )
+    # Format progress bar
+    pbar = default_progress_bar(max_steps, accelerator)
 
     agent_ids = deepcopy(env.agents)
     pop_actor_loss = [{agent_id: [] for agent_id in agent_ids} for _ in pop]
@@ -224,7 +207,10 @@ def train_multi_agent_off_policy(
         pop_episode_scores = []
         pop_fps = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
-            obs, info = env.reset()  # Reset environment at start of episode
+            agent.set_training_mode(True)
+
+            # Reset environment at start of episode
+            obs, info = env.reset()
             scores = (
                 np.zeros((num_envs, 1))
                 if sum_scores
@@ -244,19 +230,10 @@ def train_multi_agent_off_policy(
             start_time = time.time()
             for idx_step in range(evo_steps // num_envs):
                 # Get next action from agent
-                cont_actions, discrete_action = agent.get_action(
-                    obs=obs, training=True, infos=info
-                )
-                if agent.discrete_actions:
-                    action = discrete_action
-                else:
-                    action = cont_actions
+                action, raw_action = agent.get_action(obs=obs, infos=info)
 
                 if not is_vectorised:
                     action = {agent: act[0] for agent, act in action.items()}
-                    cont_actions = {
-                        agent: act[0] for agent, act in cont_actions.items()
-                    }
 
                 # Act in environment
                 next_obs, reward, termination, truncation, info = env.step(action)
@@ -284,13 +261,13 @@ def train_multi_agent_off_policy(
                         obs = {agent_id: np.squeeze(s) for agent_id, s in obs.items()}
 
                     next_obs = {
-                        agent_id: np.moveaxis(ns, [-1], [-3])
+                        agent_id: obs_channels_to_first(ns)
                         for agent_id, ns in next_obs.items()
                     }
 
                 memory.save_to_memory(
                     obs,
-                    cont_actions,
+                    raw_action,
                     reward,
                     next_obs,
                     termination,
@@ -369,6 +346,15 @@ def train_multi_agent_off_policy(
                         if not is_vectorised:
                             obs, info = env.reset()
 
+                            if swap_channels:
+                                expand_dims = not is_vectorised
+                                obs = {
+                                    agent_id: obs_channels_to_first(
+                                        s, expand_dims=expand_dims
+                                    )
+                                    for agent_id, s in obs.items()
+                                }
+
                 agent.reset_action_noise(reset_noise_indices)
 
             pbar.update(evo_steps // len(pop))
@@ -391,6 +377,7 @@ def train_multi_agent_off_policy(
                         pop_critic_loss[agent_idx][agent_id].append(
                             np.mean(critic_losses)
                         )
+
         # Evaluate population
         fitnesses = [
             agent.test(
@@ -442,6 +429,7 @@ def train_multi_agent_off_policy(
                     "train/mean_score/" + agent: np.nan
                     for idx, agent in enumerate(agent_ids)
                 }
+
             mean_fitnesses = np.mean(fitnesses, axis=0)
             max_fitnesses = np.max(fitnesses, axis=0)
             fitness_dict = {
@@ -556,45 +544,26 @@ def train_multi_agent_off_policy(
                 avg_score = {
                     agent: avg_score_arr[:, idx] for idx, agent in enumerate(agent_ids)
                 }
-                mean_scores = {
-                    agent: mean_scores[:, idx] for idx, agent in enumerate(agent_ids)
-                }
+
             agents = [agent.index for agent in pop]
             num_steps = [agent.steps[-1] for agent in pop]
             muts = [agent.mut for agent in pop]
-            pbar.update(0)
 
-            print()
-            print(
-                "DateTime, now, H:m:s-u",
-                datetime.now().hour,
-                ":",
-                datetime.now().minute,
-                ":",
-                datetime.now().second,
-                "-",
-                datetime.now().microsecond,
-            )
-            total_time = time.time() - start_time
-            print(
-                "Steps",
-                total_steps / total_time,
-                "per sec,",
-                total_steps / (total_time / 60),
-                "per min.",
-            )
-            print(
-                f"""
-                --- Global Steps {total_steps} ---
-                Fitness:\t{fitness}
-                Score:\t\t{mean_scores}
-                5 fitness avgs:\t{avg_fitness}
-                10 score avgs:\t{avg_score}
-                Agents:\t\t{agents}
-                Steps:\t\t{num_steps}
-                Mutations:\t{muts}
-                """,
-                end="\r",
+            banner_text = f"Global Steps {total_steps}"
+            banner_width = max(len(banner_text) + 8, 35)
+            border = "=" * banner_width
+            centered_text = f"{banner_text}".center(banner_width)
+            pbar.write(
+                f"{border}\n"
+                f"{centered_text}\n"
+                f"{border}\n"
+                f"Fitness:\t{fitness}\n"
+                f"Score:\t\t{mean_scores}\n"
+                f"5 fitness avgs:\t{avg_fitness}\n"
+                f"10 score avgs:\t{avg_score}\n"
+                f"Agents:\t\t{agents}\n"
+                f"Steps:\t\t{num_steps}\n"
+                f"Mutations:\t{muts}"
             )
 
         # Save model checkpoint

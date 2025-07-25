@@ -6,7 +6,7 @@ from gymnasium import spaces
 from torch.distributions import Bernoulli, Categorical, Distribution, Normal
 
 from agilerl.modules.base import EvolvableModule, EvolvableWrapper
-from agilerl.typing import ArrayOrTensor, ConfigType, DeviceType
+from agilerl.typing import ArrayOrTensor, DeviceType, NetConfigType
 
 DistributionType = Union[Distribution, List[Distribution]]
 
@@ -267,9 +267,9 @@ class TorchDistribution:
         squash_output: bool = False,
     ) -> None:
         if isinstance(distribution, list):
-            assert all(isinstance(d, Categorical) for d in distribution), (
-                "Only list of Categorical distributions are supported (for MultiDiscrete action spaces)."
-            )
+            assert all(
+                isinstance(d, Categorical) for d in distribution
+            ), "Only list of Categorical distributions are supported (for MultiDiscrete action spaces)."
 
         self.distribution = distribution
         self.squash_output = squash_output
@@ -399,11 +399,11 @@ class EvolvableDistribution(EvolvableWrapper):
             )
 
     @property
-    def net_config(self) -> ConfigType:
+    def net_config(self) -> NetConfigType:
         """Configuration of the network.
 
         :return: Configuration of the network.
-        :rtype: ConfigType
+        :rtype: NetConfigType
         """
         return self.wrapped.net_config
 
@@ -563,9 +563,12 @@ class EvolvableDistribution(EvolvableWrapper):
         :return: Cloned distribution.
         :rtype: EvolvableDistribution
         """
-        return EvolvableDistribution(
+        clone = EvolvableDistribution(
             action_space=self.action_space,
             network=self.wrapped.clone(),
             action_std_init=self.action_std_init,
+            squash_output=self.squash_output,
             device=self.device,
         )
+        clone.rng = self.rng
+        return clone
