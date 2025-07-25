@@ -54,8 +54,8 @@ class ValueNetwork(EvolvableNetwork):
         device: str = "cpu",
         random_seed: Optional[int] = None,
         encoder_name: str = "encoder",
+        **kwargs,
     ):
-
         super().__init__(
             observation_space,
             encoder_cls=encoder_cls,
@@ -70,6 +70,11 @@ class ValueNetwork(EvolvableNetwork):
             random_seed=random_seed,
             encoder_name=encoder_name,
         )
+
+        for key, value in kwargs.items():
+            print(
+                f"an extra argument has been passed and will be ignored: {key} = {value}"
+            )
 
         if head_config is None:
             head_config = asdict(MlpNetConfig(hidden_size=[16], output_activation=None))
