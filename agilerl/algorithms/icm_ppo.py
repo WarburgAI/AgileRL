@@ -10,9 +10,8 @@ from gymnasium import spaces
 from tensordict import TensorDict
 from torch.nn.utils import clip_grad_norm_
 
-from agilerl.algorithms.core.base import RLAlgorithm
+from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
 
 # Imports managed by the broader environment, placeholders for linting/type-checking
 from agilerl.components.icm import (
@@ -21,12 +20,8 @@ from agilerl.components.icm import (
 from agilerl.components.rollout_buffer import RolloutBuffer
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
-from agilerl.networks.actors import StochasticActor
-from agilerl.networks.base import EvolvableNetwork
+from agilerl.networks import EvolvableNetwork, StochasticActor
 from agilerl.networks.value_networks import ValueNetwork
-
-# Import enhanced rollout collection functions
-from agilerl.rollouts.on_policy import collect_rollouts, collect_rollouts_recurrent
 from agilerl.typing import ArrayOrTensor, BPTTSequenceType, ExperiencesType, GymEnvType
 from agilerl.utils.algo_utils import (
     flatten_experiences,
@@ -526,16 +521,25 @@ class ICM_PPO(RLAlgorithm):
             self.wrap_models()
 
         # Register network groups for mutations
-        self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
-        self.register_network_group(NetworkGroup(eval=self.critic))
-        self.register_network_group(NetworkGroup(eval=self.icm))
+        self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
+        self.register_network_group(NetworkGroup(eval_network=self.critic))
+        self.register_network_group(NetworkGroup(eval_network=self.icm))
 
         self.hidden_state = None
+        self._last_obs = None
+        self._last_done = None
+        self._last_scores = None
+        self._last_info = None
+
+        # Initialize metrics trackers
+        from agilerl.utils.metrics import MetricsTracker, TimingTracker
+
+        self.learn_metrics = MetricsTracker()
+        self.timing_tracker = TimingTracker()
         self.total_learn_time = 0.0
         self.total_collection_time = 0.0
-        self.last_collection_time = 0.0
         self.last_learn_time = 0.0
-        self.last_learn_time_metrics = {}
+        self.last_collection_time = 0.0
 
     def create_rollout_buffer(self) -> None:
         """Creates a rollout buffer with the current configuration and adds space for encoder_out."""
@@ -989,18 +993,8 @@ class ICM_PPO(RLAlgorithm):
         num_samples = observations.size(0)  # Total number of samples in the buffer
 
         indices = np.arange(num_samples)
-        total_loss_sum = 0.0
-        policy_loss_sum = 0.0
-        value_loss_sum = 0.0
-        entropy_loss_sum = 0.0
-        icm_total_loss_sum = 0.0
-        icm_i_loss_sum = 0.0
-        icm_f_loss_sum = 0.0
-        kl_sum = 0.0
-        clipfrac_sum = 0.0
-        num_updates = 0
 
-        for epoch in range(self.update_epochs):
+        for _ in range(self.update_epochs):
             np.random.shuffle(indices)
             num_minibatches_this_epoch = 0
 
@@ -1039,26 +1033,19 @@ class ICM_PPO(RLAlgorithm):
                             "Recurrent policy, but no hidden_states found in minibatch_td for flat learning."
                         )
 
-                t_start_loss = time.time()
-                loss_dict = self.compute_loss(
-                    mb_obs,
-                    mb_actions,
-                    mb_old_log_probs,
-                    mb_advantages,
-                    mb_returns,
-                    mb_latent_pi,
-                    eval_hidden_state,
-                    old_values=mb_old_values,
-                    learn_by_bptt=False,
-                )
-                t_end_loss = time.time()
-                self.last_learn_time_metrics["time/loss_calculation_time"] = (
-                    self.last_learn_time_metrics.get("time/loss_calculation_time", 0.0)
-                    + (t_end_loss - t_start_loss)
-                )
+                with self.timing_tracker.time_context("loss_calculation_time"):
+                    loss_dict = self.compute_loss(
+                        mb_obs,
+                        mb_actions,
+                        mb_old_log_probs,
+                        mb_advantages,
+                        mb_returns,
+                        mb_latent_pi,
+                        eval_hidden_state,
+                        old_values=mb_old_values,
+                        learn_by_bptt=False,
+                    )
 
-                kl_sum += loss_dict["approx_kl"]
-                clipfrac_sum += loss_dict["clip_fraction"]
                 loss = loss_dict["loss"]
 
                 if self.use_shared_encoder_for_icm:
@@ -1067,19 +1054,14 @@ class ICM_PPO(RLAlgorithm):
                         + (1 - self.icm_loss_weight) * loss
                     )
 
-                t_start_backward = time.time()
-                self.optimizer.zero_grad()
-                loss.backward()  # Gradients accumulate over the sequence within this backward call
-                clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-                clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-                if self.use_shared_encoder_for_icm:
-                    clip_grad_norm_(self.icm.parameters(), self.max_grad_norm)
-                self.optimizer.step()
-                t_end_backward = time.time()
-                self.last_learn_time_metrics["time/backward_pass_time"] = (
-                    self.last_learn_time_metrics.get("time/backward_pass_time", 0.0)
-                    + (t_end_backward - t_start_backward)
-                )
+                with self.timing_tracker.time_context("backward_pass_time"):
+                    self.optimizer.zero_grad()
+                    loss.backward()  # Gradients accumulate over the sequence within this backward call
+                    clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+                    clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+                    if self.use_shared_encoder_for_icm:
+                        clip_grad_norm_(self.icm.parameters(), self.max_grad_norm)
+                    self.optimizer.step()
 
                 if mb_latent_pi is None:  # i.e. not using shared encoder
                     icm_total_loss, icm_i_loss, icm_f_loss, _, _ = self.icm.update(
@@ -1093,54 +1075,32 @@ class ICM_PPO(RLAlgorithm):
                             eval_hidden_state[1:] if eval_hidden_state else None
                         ),
                     )
-                    icm_total_loss_sum += icm_total_loss.item()
-                    icm_i_loss_sum += icm_i_loss.item()
-                    icm_f_loss_sum += icm_f_loss.item()
+                    self.learn_metrics.add("icm_total_loss", icm_total_loss.item())
+                    self.learn_metrics.add("icm_i_loss", icm_i_loss.item())
+                    self.learn_metrics.add("icm_f_loss", icm_f_loss.item())
 
-                total_loss_sum += loss.item()
-                policy_loss_sum += loss_dict["policy_loss"].item()
-                value_loss_sum += loss_dict["value_loss"].item()
-                entropy_loss_sum += loss_dict["entropy_loss"].item()
+                # Track metrics
+                self.learn_metrics.add("total_loss", loss.item())
+                self.learn_metrics.add("policy_loss", loss_dict["policy_loss"].item())
+                self.learn_metrics.add("value_loss", loss_dict["value_loss"].item())
+                self.learn_metrics.add("entropy_loss", loss_dict["entropy_loss"].item())
+                self.learn_metrics.add("approx_kl", loss_dict["approx_kl"])
+                self.learn_metrics.add("clip_fraction", loss_dict["clip_fraction"])
                 if self.use_shared_encoder_for_icm:
-                    icm_total_loss_sum += loss_dict["icm_total_loss"].item()
-                    icm_i_loss_sum += loss_dict["icm_i_loss"].item()
-                    icm_f_loss_sum += loss_dict["icm_f_loss"].item()
+                    self.learn_metrics.add(
+                        "icm_total_loss", loss_dict["icm_total_loss"].item()
+                    )
+                    self.learn_metrics.add("icm_i_loss", loss_dict["icm_i_loss"].item())
+                    self.learn_metrics.add("icm_f_loss", loss_dict["icm_f_loss"].item())
 
-                num_updates += 1
                 num_minibatches_this_epoch += 1
 
             if (
                 self.target_kl is not None
-                and np.mean(kl_sum / num_updates) > self.target_kl
+                and self.learn_metrics.get_count("approx_kl") > 0
+                and self.learn_metrics.get_average("approx_kl") > self.target_kl
             ):
                 break  # Early stopping for the epoch if KL divergence target is exceeded
-
-        if num_updates > 0:
-            metrics = {
-                "learn/total_loss": total_loss_sum / num_updates,
-                "learn/policy_loss": policy_loss_sum / num_updates,
-                "learn/value_loss": value_loss_sum / num_updates,
-                "learn/entropy_loss": entropy_loss_sum / num_updates,
-                "learn/icm_total_loss": icm_total_loss_sum / num_updates,
-                "learn/icm_inverse_loss": icm_i_loss_sum / num_updates,
-                "learn/icm_forward_loss": icm_f_loss_sum / num_updates,
-                "learn/approx_kl": kl_sum / num_updates,
-                "learn/clip_fraction": clipfrac_sum / num_updates,
-            }
-        else:
-            metrics = {
-                "learn/total_loss": 0.0,
-                "learn/policy_loss": 0.0,
-                "learn/value_loss": 0.0,
-                "learn/entropy_loss": 0.0,
-                "learn/icm_total_loss": 0.0,
-                "learn/icm_inverse_loss": 0.0,
-                "learn/icm_forward_loss": 0.0,
-                "learn/approx_kl": 0.0,
-                "learn/clip_fraction": 0.0,
-            }
-
-        return metrics
 
     # ------------------------------------------------------------------
     # New BPTT learning logic
@@ -1172,23 +1132,23 @@ class ICM_PPO(RLAlgorithm):
             }
 
         # Normalize advantages globally once before epochs
-        t_start_adv_norm = time.time()
-        valid_advantages_tensor = self.rollout_buffer.buffer["advantages"][
-            :buffer_actual_size
-        ]
-        if valid_advantages_tensor.numel() > 0:
-            original_shape = valid_advantages_tensor.shape
-            flat_adv = valid_advantages_tensor.reshape(-1)
-            normalized_flat_adv = (flat_adv - flat_adv.mean()) / (flat_adv.std() + 1e-8)
-            self.rollout_buffer.buffer["advantages"][:buffer_actual_size] = (
-                normalized_flat_adv.reshape(original_shape)
-            )
-        else:
-            warnings.warn("No advantages to normalize in BPTT pre-normalization step.")
-        t_end_adv_norm = time.time()
-        self.last_learn_time_metrics["time/advantage_normalization_time"] = (
-            t_end_adv_norm - t_start_adv_norm
-        )
+        with self.timing_tracker.time_context("advantage_normalization_time"):
+            valid_advantages_tensor = self.rollout_buffer.buffer["advantages"][
+                :buffer_actual_size
+            ]
+            if valid_advantages_tensor.numel() > 0:
+                original_shape = valid_advantages_tensor.shape
+                flat_adv = valid_advantages_tensor.reshape(-1)
+                normalized_flat_adv = (flat_adv - flat_adv.mean()) / (
+                    flat_adv.std() + 1e-8
+                )
+                self.rollout_buffer.buffer["advantages"][:buffer_actual_size] = (
+                    normalized_flat_adv.reshape(original_shape)
+                )
+            else:
+                warnings.warn(
+                    "No advantages to normalize in BPTT pre-normalization step."
+                )
 
         # Determine all possible start coordinates for sequences
         num_possible_starts_per_env = buffer_actual_size - seq_len + 1
@@ -1196,17 +1156,7 @@ class ICM_PPO(RLAlgorithm):
             warnings.warn(
                 f"Not enough data in buffer ({buffer_actual_size} steps) to form sequences of length {seq_len}. Skipping BPTT."
             )
-            return {
-                "learn/total_loss": 0.0,
-                "learn/policy_loss": 0.0,
-                "learn/value_loss": 0.0,
-                "learn/entropy_loss": 0.0,
-                "learn/icm_total_loss": 0.0,
-                "learn/icm_inverse_loss": 0.0,
-                "learn/icm_forward_loss": 0.0,
-                "learn/approx_kl": 0.0,
-                "learn/clip_fraction": 0.0,
-            }
+            return
 
         all_start_coords = []  # List of (env_idx, time_idx_in_env_rollout)
         if self.bptt_sequence_type == BPTTSequenceType.CHUNKED:
@@ -1215,17 +1165,7 @@ class ICM_PPO(RLAlgorithm):
                 warnings.warn(
                     f"Not enough data for any full chunks of length {seq_len}. Skipping BPTT."
                 )
-                return {
-                    "learn/total_loss": 0.0,
-                    "learn/policy_loss": 0.0,
-                    "learn/value_loss": 0.0,
-                    "learn/entropy_loss": 0.0,
-                    "learn/icm_total_loss": 0.0,
-                    "learn/icm_inverse_loss": 0.0,
-                    "learn/icm_forward_loss": 0.0,
-                    "learn/approx_kl": 0.0,
-                    "learn/clip_fraction": 0.0,
-                }
+                return
             for env_idx in range(self.num_envs):
                 for chunk_i in range(num_chunks_per_env):
                     all_start_coords.append((env_idx, chunk_i * seq_len))
@@ -1241,17 +1181,7 @@ class ICM_PPO(RLAlgorithm):
                 )
                 num_chunks_per_env = buffer_actual_size // seq_len
                 if num_chunks_per_env == 0:
-                    return {
-                        "learn/total_loss": 0.0,
-                        "learn/policy_loss": 0.0,
-                        "learn/value_loss": 0.0,
-                        "learn/entropy_loss": 0.0,
-                        "learn/icm_total_loss": 0.0,
-                        "learn/icm_inverse_loss": 0.0,
-                        "learn/icm_forward_loss": 0.0,
-                        "learn/approx_kl": 0.0,
-                        "learn/clip_fraction": 0.0,
-                    }  # Not enough for even one chunk
+                    return  # Not enough for even one chunk
                 for env_idx in range(self.num_envs):
                     for chunk_i in range(num_chunks_per_env):
                         all_start_coords.append((env_idx, chunk_i * seq_len))
@@ -1266,34 +1196,13 @@ class ICM_PPO(RLAlgorithm):
 
         if not all_start_coords:
             warnings.warn("No BPTT sequences to sample. Skipping learning.")
-            return {
-                "learn/total_loss": 0.0,
-                "learn/policy_loss": 0.0,
-                "learn/value_loss": 0.0,
-                "learn/entropy_loss": 0.0,
-                "learn/icm_total_loss": 0.0,
-                "learn/icm_inverse_loss": 0.0,
-                "learn/icm_forward_loss": 0.0,
-                "learn/approx_kl": 0.0,
-                "learn/clip_fraction": 0.0,
-            }
+            return
 
         sequences_per_minibatch = (
             self.batch_size
         )  # Here, batch_size means number of sequences per minibatch
-        total_loss_sum = 0.0
-        policy_loss_sum = 0.0
-        value_loss_sum = 0.0
-        entropy_loss_sum = 0.0
-        icm_total_loss_sum = 0.0
-        icm_i_loss_sum = 0.0
-        icm_f_loss_sum = 0.0
-        kl_sum = 0.0
-        clipfrac_sum = 0.0
-        num_updates = 0
 
-        for epoch in range(self.update_epochs):
-            approx_kl_divs_epoch = []  # KL divergences for this epoch's minibatches
+        for _ in range(self.update_epochs):
             np.random.shuffle(all_start_coords)
             num_minibatches_this_epoch = 0
 
@@ -1307,21 +1216,14 @@ class ICM_PPO(RLAlgorithm):
                 # Fetch minibatch of sequences; returns TensorDict on self.device
                 # Batch_size: [len(current_coords_minibatch), seq_len]
                 # "initial_hidden_states" is a non-tensor entry in TD: Dict[str, Tensor(batch_seq_size, layers, size)]
-                t_start_get_batch = time.time()
-                current_minibatch_td = (
-                    self.rollout_buffer.get_specific_sequences_tensor_batch(
-                        seq_len=seq_len,
-                        sequence_coords=current_coords_minibatch,
-                        device=self.device,
+                with self.timing_tracker.time_context("get_sequences_batch_time"):
+                    current_minibatch_td = (
+                        self.rollout_buffer.get_specific_sequences_tensor_batch(
+                            seq_len=seq_len,
+                            sequence_coords=current_coords_minibatch,
+                            device=self.device,
+                        )
                     )
-                )
-                t_end_get_batch = time.time()
-                self.last_learn_time_metrics["time/get_sequences_batch_time"] = (
-                    self.last_learn_time_metrics.get(
-                        "time/get_sequences_batch_time", 0.0
-                    )
-                    + (t_end_get_batch - t_start_get_batch)
-                )
 
                 if (
                     current_minibatch_td.is_empty()
@@ -1358,7 +1260,6 @@ class ICM_PPO(RLAlgorithm):
                 current_step_hidden_state_actor = (
                     None  # For actor: {key: (layers, batch_seq_size, hidden_size)}
                 )
-                approx_kl_divs_minibatch_timesteps = []
 
                 if self.recurrent and mb_initial_hidden_states_dict is not None:
                     current_step_hidden_state_actor = {
@@ -1367,27 +1268,19 @@ class ICM_PPO(RLAlgorithm):
                         for key, val in mb_initial_hidden_states_dict.items()
                     }
 
-                t_start_loss = time.time()
-                loss_dict = self.compute_loss(
-                    mb_obs_seq,
-                    mb_actions_seq,
-                    mb_old_log_probs_seq,
-                    mb_advantages_seq,
-                    mb_returns_seq,
-                    mb_latent_pi,
-                    current_step_hidden_state_actor,
-                    seq_len=seq_len,
-                    learn_by_bptt=True,
-                    old_values=mb_old_values_seq,
-                )
-                t_end_loss = time.time()
-                self.last_learn_time_metrics["time/bptt_loss_calculation_time"] = (
-                    self.last_learn_time_metrics.get(
-                        "time/bptt_loss_calculation_time", 0.0
+                with self.timing_tracker.time_context("bptt_loss_calculation_time"):
+                    loss_dict = self.compute_loss(
+                        mb_obs_seq,
+                        mb_actions_seq,
+                        mb_old_log_probs_seq,
+                        mb_advantages_seq,
+                        mb_returns_seq,
+                        mb_latent_pi,
+                        current_step_hidden_state_actor,
+                        seq_len=seq_len,
+                        learn_by_bptt=True,
+                        old_values=mb_old_values_seq,
                     )
-                    + (t_end_loss - t_start_loss)
-                )
-                approx_kl_divs_minibatch_timesteps.append(loss_dict["approx_kl"])
                 loss = loss_dict["loss"]
 
                 if self.use_shared_encoder_for_icm:
@@ -1396,21 +1289,14 @@ class ICM_PPO(RLAlgorithm):
                         + (1 - self.icm_loss_weight) * loss
                     )
 
-                t_start_backward = time.time()
-                self.optimizer.zero_grad()
-                loss.backward()  # Gradients accumulate over the sequence within this backward call
-                clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-                clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-                if self.use_shared_encoder_for_icm:
-                    clip_grad_norm_(self.icm.parameters(), self.max_grad_norm)
-                self.optimizer.step()
-                t_end_backward = time.time()
-                self.last_learn_time_metrics["time/bptt_backward_pass_time"] = (
-                    self.last_learn_time_metrics.get(
-                        "time/bptt_backward_pass_time", 0.0
-                    )
-                    + (t_end_backward - t_start_backward)
-                )
+                with self.timing_tracker.time_context("bptt_backward_pass_time"):
+                    self.optimizer.zero_grad()
+                    loss.backward()  # Gradients accumulate over the sequence within this backward call
+                    clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+                    clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+                    if self.use_shared_encoder_for_icm:
+                        clip_grad_norm_(self.icm.parameters(), self.max_grad_norm)
+                    self.optimizer.step()
 
                 if mb_latent_pi is None:  # i.e. not using shared encoder
                     icm_total_loss, icm_i_loss, icm_f_loss, _, _ = self.icm.update(
@@ -1420,92 +1306,38 @@ class ICM_PPO(RLAlgorithm):
                         hidden_state_obs=mb_initial_hidden_states_dict,
                         hidden_state_next_obs=mb_initial_hidden_states_dict,
                     )
-                    icm_total_loss_sum += icm_total_loss.item()
-                    icm_i_loss_sum += icm_i_loss.item()
-                    icm_f_loss_sum += icm_f_loss.item()
+                    self.learn_metrics.add("icm_total_loss", icm_total_loss.item())
+                    self.learn_metrics.add("icm_i_loss", icm_i_loss.item())
+                    self.learn_metrics.add("icm_f_loss", icm_f_loss.item())
 
-                mean_loss = loss.item()
+                # Track metrics for this minibatch
+                self.learn_metrics.add("total_loss", loss.item())
+                self.learn_metrics.add("policy_loss", (loss_dict["policy_loss"]).item())
+                self.learn_metrics.add("value_loss", (loss_dict["value_loss"]).item())
+                self.learn_metrics.add(
+                    "entropy_loss", (loss_dict["entropy_loss"]).item()
+                )
+                self.learn_metrics.add("approx_kl", loss_dict["approx_kl"])
+                self.learn_metrics.add("clip_fraction", loss_dict["clip_fraction"])
+                if self.use_shared_encoder_for_icm:
+                    self.learn_metrics.add(
+                        "icm_total_loss", loss_dict["icm_total_loss"].item()
+                    )
+                    self.learn_metrics.add("icm_i_loss", loss_dict["icm_i_loss"].item())
+                    self.learn_metrics.add("icm_f_loss", loss_dict["icm_f_loss"].item())
+
                 num_minibatches_this_epoch += 1
 
                 if (
                     self.target_kl is not None
-                    and len(approx_kl_divs_minibatch_timesteps) > 0
+                    and self.learn_metrics.get_count("approx_kl") > 0
+                    and self.learn_metrics.get_average("approx_kl") > self.target_kl
                 ):
-                    # Average KL over all timesteps in this minibatch of sequences
-                    kl_for_current_minibatch = np.mean(
-                        approx_kl_divs_minibatch_timesteps
-                    )
-                    approx_kl_divs_epoch.append(
-                        kl_for_current_minibatch
-                    )  # Store minibatch average KL
 
-                    if kl_for_current_minibatch > self.target_kl:
-                        warnings.warn(
-                            f"Epoch {epoch}, Minibatch: KL divergence {kl_for_current_minibatch:.4f} exceeded target {self.target_kl}. Stopping update for this epoch."
-                        )
-                        break  # Break from minibatch loop for this epoch
-
-                total_loss_sum += mean_loss
-                policy_loss_sum += loss_dict["policy_loss"].item()
-                value_loss_sum += loss_dict["value_loss"].item()
-                entropy_loss_sum += loss_dict["entropy_loss"].item()
-                if self.use_shared_encoder_for_icm:
-                    icm_total_loss_sum += loss_dict["icm_total_loss"].item()
-                    icm_i_loss_sum += loss_dict["icm_i_loss"].item()
-                    icm_f_loss_sum += loss_dict["icm_f_loss"].item()
-
-                num_updates += 1
-
-            if self.target_kl is not None and len(approx_kl_divs_epoch) > 0:
-                avg_kl_this_epoch = np.mean(approx_kl_divs_epoch)
-                if (
-                    avg_kl_this_epoch > self.target_kl
-                    and not (  # Ensure this wasn't the break from inner loop
-                        len(approx_kl_divs_minibatch_timesteps) > 0
-                        and np.mean(approx_kl_divs_minibatch_timesteps) > self.target_kl
-                    )
-                ):
                     warnings.warn(
-                        f"Epoch {epoch}: Average KL divergence {avg_kl_this_epoch:.4f} exceeded target {self.target_kl} after completing epoch. Consider adjusting learning rate or target_kl."
+                        f"Minibatch: KL divergence {self.learn_metrics.get_average('approx_kl'):.4f} exceeded target {self.target_kl}. Stopping update for this epoch."
                     )
-                    # This break is for the epoch loop if KL was exceeded on average for the epoch
-                    # but not necessarily in the last minibatch that would have broken the inner loop.
-                    break
-
-            # If inner loop broke due to KL, this outer break also executes
-            if (
-                self.target_kl is not None
-                and len(approx_kl_divs_minibatch_timesteps) > 0
-                and np.mean(approx_kl_divs_minibatch_timesteps) > self.target_kl
-            ):
-                break
-
-        if num_updates > 0:
-            metrics = {
-                "learn/total_loss": total_loss_sum / num_updates,
-                "learn/policy_loss": policy_loss_sum / num_updates,
-                "learn/value_loss": value_loss_sum / num_updates,
-                "learn/entropy_loss": entropy_loss_sum / num_updates,
-                "learn/icm_total_loss": icm_total_loss_sum / num_updates,
-                "learn/icm_inverse_loss": icm_i_loss_sum / num_updates,
-                "learn/icm_forward_loss": icm_f_loss_sum / num_updates,
-                "learn/approx_kl": kl_sum / num_updates,
-                "learn/clip_fraction": clipfrac_sum / num_updates,
-            }
-        else:
-            metrics = {
-                "learn/total_loss": 0.0,
-                "learn/policy_loss": 0.0,
-                "learn/value_loss": 0.0,
-                "learn/entropy_loss": 0.0,
-                "learn/icm_total_loss": 0.0,
-                "learn/icm_inverse_loss": 0.0,
-                "learn/icm_forward_loss": 0.0,
-                "learn/approx_kl": 0.0,
-                "learn/clip_fraction": 0.0,
-            }
-
-        return metrics
+                    break  # Break from minibatch loop for this epoch
 
     def compute_loss(
         self,
@@ -2020,6 +1852,15 @@ class ICM_PPO(RLAlgorithm):
 
         return flat_hidden
 
+    def add_collection_time(self, collection_time: float) -> None:
+        """Add collection time to metrics tracker.
+
+        :param collection_time: Time spent collecting experiences
+        :type collection_time: float
+        """
+        self.last_collection_time = collection_time
+        self.total_collection_time += collection_time
+
     def _get_action_and_values_icm(
         self,
         obs: ArrayOrTensor,
@@ -2162,7 +2003,7 @@ class ICM_PPO(RLAlgorithm):
         num_samples = experiences[4].size(0)
         batch_idxs = np.arange(num_samples)
         mean_loss = 0
-        for epoch in range(self.update_epochs):
+        for _ in range(self.update_epochs):
             np.random.shuffle(batch_idxs)
             for start in range(0, num_samples, self.batch_size):
                 minibatch_idxs = batch_idxs[start : start + self.batch_size]
