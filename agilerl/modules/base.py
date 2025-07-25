@@ -369,7 +369,13 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         constructor_args = inspect.signature(self.__init__).parameters
 
         try:
-            return {k: getattr(self, k) for k in constructor_args.keys()}
+            result = {}
+            for k in constructor_args.keys():
+                if k in ("self", "args", "kwargs"):
+                    # Skip special parameters that aren't stored as attributes
+                    continue
+                result[k] = getattr(self, k)
+            return result
         except AttributeError as e:
             raise AttributeError(
                 "Custom EvolvableModule objects must be explicit about their "

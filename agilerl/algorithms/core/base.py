@@ -801,6 +801,9 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         if self.accelerator is not None:
             self.unwrap_models()
 
+        print(self.evolvable_attributes(networks_only=True))
+        print(self.evolvable_attributes())
+
         # Clone evolvable modules
         cloned_modules = {}
         for attr, obj in self.evolvable_attributes(networks_only=True).items():

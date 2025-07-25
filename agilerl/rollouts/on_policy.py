@@ -71,6 +71,7 @@ class RolloutHook(ABC):
             "log_prob": log_prob,
             "next_obs": next_obs,
             "hidden_state": hidden_state,
+            **step_data,
         }
 
     def add_to_buffer(self, agent, buffer_data: Dict[str, Any]) -> None:
@@ -169,6 +170,7 @@ class ICMHook(RolloutHook):
     def add_to_buffer(self, agent, buffer_data: Dict[str, Any]) -> None:
         # ICM uses custom buffer addition
         encoder_output = buffer_data.get("encoder_output")
+
         encoder_output_np = (
             np.atleast_1d(encoder_output) if encoder_output is not None else None
         )

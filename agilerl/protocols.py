@@ -94,14 +94,16 @@ class EvolvableModule(Protocol):
     reconstruction and optimization purposes.
     """
 
-    init_dict: Dict[str, Any]
     device: DeviceType
     layer_mutation_methods: List[str]
     node_mutation_methods: List[str]
     mutation_methods: List[str]
-    last_mutation_attr: str
-    last_mutation: Callable[[Any], Any]
+    last_mutation_attr: Optional[str]
+    last_mutation: Optional[Callable[[Any], Any]]
     rng: Optional[Generator]
+
+    @property
+    def init_dict(self) -> Dict[str, Any]: ...
 
     @property
     def activation(self) -> Optional[str]: ...
