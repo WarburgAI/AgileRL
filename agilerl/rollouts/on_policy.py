@@ -550,14 +550,15 @@ def _collect_rollouts(
         # Calculate last value to compute returns and advantages properly
         with torch.no_grad():
             if recurrent:
-                _, _, _, last_value, _ = agent._get_action_and_values(
+                action_result = agent._get_action_and_values(
                     agent.preprocess_observation(obs),
                     hidden_state=agent.hidden_state,
                 )
             else:
-                _, _, _, last_value, _ = agent._get_action_and_values(
+                action_result = agent._get_action_and_values(
                     agent.preprocess_observation(obs)
                 )
+            last_value = action_result[3]
 
             last_value = last_value.cpu().numpy()
             last_done = np.atleast_1d(term)

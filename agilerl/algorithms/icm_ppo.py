@@ -897,7 +897,6 @@ class ICM_PPO(RLAlgorithm):
         :return: Dictionary of metrics including total_loss, policy_loss, value_loss, entropy_loss, approx_kl, and clip_fraction.
         :rtype: Dict[str, float]
         """
-        self.last_learn_time_metrics.clear()
         start_time = time.time()
         # Use rollout buffer if enabled and no experiences provided
         if self.use_rollout_buffer and experiences is None:
@@ -918,15 +917,18 @@ class ICM_PPO(RLAlgorithm):
         self.last_learn_time = end_time - start_time
         self.total_learn_time += self.last_learn_time
 
-        metrics.update(
-            {
-                "time/last_learn_time": self.last_learn_time,
-                "time/total_learn_time": self.total_learn_time,
-                "time/last_collection_time": self.last_collection_time,
-                "time/total_collection_time": self.total_collection_time,
-                **self.last_learn_time_metrics,
-            }
-        )
+        # Add timing metrics from TimingTracker
+        timing_metrics = {
+            "time/last_learn_time": self.last_learn_time,
+            "time/total_learn_time": self.total_learn_time,
+            "time/last_collection_time": self.last_collection_time,
+            "time/total_collection_time": self.total_collection_time,
+        }
+
+        # Add detailed timing metrics from timing_tracker
+        timing_metrics.update(self.timing_tracker.get_all_metrics())
+
+        metrics.update(timing_metrics)
         return metrics
 
     def _learn_from_rollout_buffer(self) -> Dict[str, float]:
@@ -957,12 +959,8 @@ class ICM_PPO(RLAlgorithm):
             buffer_td = buffer_td_external
         else:
             # .get_tensor_batch() returns a TensorDict on the specified device
-            t_start_get_batch = time.time()
-            buffer_td = self.rollout_buffer.get_tensor_batch(device=self.device)
-            t_end_get_batch = time.time()
-            self.last_learn_time_metrics["time/get_tensor_batch_time"] = (
-                t_end_get_batch - t_start_get_batch
-            )
+            with self.timing_tracker.time_context("get_tensor_batch_time"):
+                buffer_td = self.rollout_buffer.get_tensor_batch(device=self.device)
 
         if buffer_td.is_empty():
             warnings.warn("Buffer data is empty. Skipping learning step.")
@@ -982,12 +980,8 @@ class ICM_PPO(RLAlgorithm):
         advantages = buffer_td["advantages"]
 
         # Normalize advantages
-        t_start_adv_norm = time.time()
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        t_end_adv_norm = time.time()
-        self.last_learn_time_metrics["time/advantage_normalization_time"] = (
-            t_end_adv_norm - t_start_adv_norm
-        )
+        with self.timing_tracker.time_context("advantage_normalization_time"):
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         batch_size = self.batch_size
         num_samples = observations.size(0)  # Total number of samples in the buffer
@@ -1101,6 +1095,19 @@ class ICM_PPO(RLAlgorithm):
                 and self.learn_metrics.get_average("approx_kl") > self.target_kl
             ):
                 break  # Early stopping for the epoch if KL divergence target is exceeded
+
+        # Return the average metrics
+        return {
+            "learn/total_loss": self.learn_metrics.get_average("total_loss"),
+            "learn/policy_loss": self.learn_metrics.get_average("policy_loss"),
+            "learn/value_loss": self.learn_metrics.get_average("value_loss"),
+            "learn/entropy_loss": self.learn_metrics.get_average("entropy_loss"),
+            "learn/icm_total_loss": self.learn_metrics.get_average("icm_total_loss"),
+            "learn/icm_i_loss": self.learn_metrics.get_average("icm_i_loss"),
+            "learn/icm_f_loss": self.learn_metrics.get_average("icm_f_loss"),
+            "learn/approx_kl": self.learn_metrics.get_average("approx_kl"),
+            "learn/clip_fraction": self.learn_metrics.get_average("clip_fraction"),
+        }
 
     # ------------------------------------------------------------------
     # New BPTT learning logic
@@ -1338,6 +1345,19 @@ class ICM_PPO(RLAlgorithm):
                         f"Minibatch: KL divergence {self.learn_metrics.get_average('approx_kl'):.4f} exceeded target {self.target_kl}. Stopping update for this epoch."
                     )
                     break  # Break from minibatch loop for this epoch
+
+        # Return the average metrics
+        return {
+            "learn/total_loss": self.learn_metrics.get_average("total_loss"),
+            "learn/policy_loss": self.learn_metrics.get_average("policy_loss"),
+            "learn/value_loss": self.learn_metrics.get_average("value_loss"),
+            "learn/entropy_loss": self.learn_metrics.get_average("entropy_loss"),
+            "learn/icm_total_loss": self.learn_metrics.get_average("icm_total_loss"),
+            "learn/icm_i_loss": self.learn_metrics.get_average("icm_i_loss"),
+            "learn/icm_f_loss": self.learn_metrics.get_average("icm_f_loss"),
+            "learn/approx_kl": self.learn_metrics.get_average("approx_kl"),
+            "learn/clip_fraction": self.learn_metrics.get_average("clip_fraction"),
+        }
 
     def compute_loss(
         self,
