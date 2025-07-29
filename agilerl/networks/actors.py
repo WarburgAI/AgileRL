@@ -379,32 +379,76 @@ class StochasticActor(EvolvableNetwork):
         :return: Action, log probability of the action, and entropy of the distribution.
         :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
-        return self.head_net.forward(
-            latent, action_mask, sample=sample, deterministic=deterministic
-        )
+        # Handle sequence inputs - latent may be (batch, seq_len, latent_dim)
+        if len(latent.shape) == 3:
+            batch_size, seq_len = latent.shape[0], latent.shape[1]
+            # Flatten for distribution processing
+            latent_flat = latent.reshape(batch_size * seq_len, -1)
+
+            # Process through distribution head
+            action_flat, log_prob_flat, entropy_flat = self.head_net.forward(
+                latent_flat, action_mask, sample=sample, deterministic=deterministic
+            )
+
+            # Reshape back to sequence format
+            action = action_flat.reshape(batch_size, seq_len, -1)
+            log_prob = (
+                log_prob_flat.reshape(batch_size, seq_len, -1)
+                if len(log_prob_flat.shape) > 1
+                else log_prob_flat.reshape(batch_size, seq_len)
+            )
+            entropy = (
+                entropy_flat.reshape(batch_size, seq_len, -1)
+                if len(entropy_flat.shape) > 1
+                else entropy_flat.reshape(batch_size, seq_len)
+            )
+
+            return action, log_prob, entropy
+        else:
+            return self.head_net.forward(
+                latent, action_mask, sample=sample, deterministic=deterministic
+            )
 
     def forward(
         self,
         obs: TorchObsType,
         action_mask: Optional[ArrayOrTensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        hidden_state: Optional[TorchObsType] = None,
+    ) -> Union[
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    ]:
         """Forward pass of the network.
 
         :param obs: Observation input.
         :type obs: TorchObsType
         :param action_mask: Action mask.
         :type action_mask: Optional[ArrayOrTensor]
-        :return: Action and log probability of the action.
-        :rtype: Tuple[torch.Tensor, torch.Tensor]
+        :param hidden_state: Hidden state for recurrent networks.
+        :type hidden_state: Optional[TorchObsType]
+        :return: Action, log probability, entropy, and optionally next hidden state.
+        :rtype: Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]
         """
-        latent = self.extract_features(obs)
-        action, log_prob, entropy = self.forward_head(latent, action_mask)
+        if self.recurrent and hidden_state is not None:
+            latent, next_hidden_state = self.extract_features(
+                obs, hidden_state=hidden_state
+            )
+            action, log_prob, entropy = self.forward_head(latent, action_mask)
 
-        # Action scaling only relevant for continuous action spaces with squashing
-        if isinstance(self.action_space, spaces.Box) and self.squash_output:
-            action = self.scale_action(action)
+            # Action scaling only relevant for continuous action spaces with squashing
+            if isinstance(self.action_space, spaces.Box) and self.squash_output:
+                action = self.scale_action(action)
 
-        return action, log_prob, entropy
+            return action, log_prob, entropy, next_hidden_state
+        else:
+            latent = self.extract_features(obs)
+            action, log_prob, entropy = self.forward_head(latent, action_mask)
+
+            # Action scaling only relevant for continuous action spaces with squashing
+            if isinstance(self.action_space, spaces.Box) and self.squash_output:
+                action = self.scale_action(action)
+
+            return action, log_prob, entropy
 
     def action_log_prob(self, action: torch.Tensor) -> torch.Tensor:
         """Get the log probability of the action.

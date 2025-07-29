@@ -115,10 +115,34 @@ class ValueNetwork(EvolvableNetwork):
         """
         if self.recurrent:
             latent, hidden_state = self.extract_features(x, hidden_state=hidden_state)
-            return self.head_net(latent), hidden_state
+
+            # Handle sequence inputs - latent may be (batch, seq_len, latent_dim)
+            if len(latent.shape) == 3:
+                batch_size, seq_len = latent.shape[0], latent.shape[1]
+                # Flatten for head processing
+                latent_flat = latent.reshape(batch_size * seq_len, -1)
+                values_flat = self.head_net(latent_flat)
+                # Reshape back to (batch, seq_len, 1)
+                values = values_flat.reshape(batch_size, seq_len, -1)
+            else:
+                values = self.head_net(latent)
+
+            return values, hidden_state
         else:
             latent = self.extract_features(x)
-            return self.head_net(latent)
+
+            # Handle sequence inputs - latent may be (batch, seq_len, latent_dim)
+            if len(latent.shape) == 3:
+                batch_size, seq_len = latent.shape[0], latent.shape[1]
+                # Flatten for head processing
+                latent_flat = latent.reshape(batch_size * seq_len, -1)
+                values_flat = self.head_net(latent_flat)
+                # Reshape back to (batch, seq_len, 1)
+                values = values_flat.reshape(batch_size, seq_len, -1)
+            else:
+                values = self.head_net(latent)
+
+            return values
 
     def recreate_network(self) -> None:
         """Recreates the network."""

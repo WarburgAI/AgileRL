@@ -402,45 +402,31 @@ class PPO(RLAlgorithm):
         :rtype: Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[Dict[str, ArrayOrTensor]]]
         """
         if hidden_state is not None:
-            latent_pi, next_hidden_actor = self.actor.extract_features(
-                obs, hidden_state=hidden_state
+            # For recurrent networks, use the updated forward method that handles sequences
+            action, log_prob, entropy, next_hidden_actor = self.actor.forward(
+                obs, action_mask=action_mask, hidden_state=hidden_state
             )
-            action, log_prob, entropy = self.actor.forward_head(
-                latent_pi,
-                action_mask=action_mask,
-                sample=sample,
-                deterministic=deterministic,
-            )
-
             # Start with actor's next hidden state
             next_hidden_combined: Dict[str, torch.Tensor] = next_hidden_actor
             if self.share_encoders:
+                # Extract features and pass to critic head
+                latent_pi, _ = self.actor.extract_features(
+                    obs, hidden_state=hidden_state
+                )
                 values = self.critic.forward_head(latent_pi).squeeze(-1)
             else:
-                # If not sharing, critic might have its own hidden state components or update existing ones
+                # If not sharing, critic has its own forward pass
                 values, next_hidden_critic = self.critic(
                     obs, hidden_state=hidden_state
                 )  # Pass original hidden_state
                 values = values.squeeze(-1)
-
                 # Merge if critic returns its own next_hidden
                 if next_hidden_critic is not None:
                     next_hidden_combined.update(next_hidden_critic)
-
             return action, log_prob, entropy, values, next_hidden_combined
         else:
-            latent_pi = self.actor.extract_features(obs)
-            action, log_prob, entropy = self.actor.forward_head(
-                latent_pi,
-                action_mask=action_mask,
-                sample=sample,
-                deterministic=deterministic,
-            )
-            values = (
-                self.critic.forward_head(latent_pi).squeeze(-1)
-                if self.share_encoders
-                else self.critic(obs).squeeze(-1)
-            )
+            action, log_prob, entropy = self.actor.forward(obs, action_mask=action_mask)
+            values = self.critic(obs).squeeze(-1)
             return action, log_prob, entropy, values, None
 
     def get_hidden_state_architecture(self) -> Dict[str, Tuple[int, ...]]:
@@ -945,84 +931,69 @@ class PPO(RLAlgorithm):
                     }
 
                 with self.timing_tracker.time_context("bptt_forward_pass_time"):
-                    for t in range(seq_len):
-                        obs_t = (
-                            mb_obs_seq[:, t]
-                            if not isinstance(mb_obs_seq, TensorDict)
-                            else mb_obs_seq[:, t]
-                        )
-                        actions_t, old_log_prob_t = (
-                            mb_actions_seq[:, t],
-                            mb_old_log_probs_seq[:, t],
-                        )
-                        adv_t, return_t = mb_advantages_seq[:, t], mb_returns_seq[:, t]
+                    # Vectorized forward pass over entire sequence
+                    (
+                        _,
+                        new_log_prob_seq,
+                        entropy_seq,
+                        new_value_seq,
+                        next_hidden_state_for_actor_step,
+                    ) = self._get_action_and_values(
+                        mb_obs_seq,  # Shape: (batch_seq, seq_len, *obs_dims)
+                        hidden_state=current_step_hidden_state_actor,
+                        sample=False,
+                    )  # Returns: (batch_seq, seq_len, *) tensors and final hidden state
 
-                        (
-                            _,
-                            _,
-                            entropy_t,
-                            new_value_t,
-                            next_hidden_state_for_actor_step,
-                        ) = self._get_action_and_values(
-                            obs_t,
-                            hidden_state=current_step_hidden_state_actor,
-                            sample=False,
-                        )  # new_value_t: (batch_seq,), entropy_t: (batch_seq,) or scalar
+                    # Compute action log probabilities for entire sequence
+                    new_log_prob_seq = self.actor.action_log_prob(
+                        mb_actions_seq
+                    )  # Shape: (batch_seq, seq_len)
 
-                        new_log_prob_t = self.actor.action_log_prob(
-                            actions_t
-                        )  # Shape: (batch_seq,)
-                        entropy_t = (
-                            (-new_log_prob_t.mean())
-                            if entropy_t is None
-                            else entropy_t.mean()
-                        )  # Ensure scalar
+                    # Handle entropy - ensure it's per timestep if needed
+                    if entropy_seq is None:
+                        entropy_seq = (
+                            -new_log_prob_seq
+                        )  # Use negative log prob as entropy
 
-                        ratio = torch.exp(new_log_prob_t - old_log_prob_t)
-                        policy_loss1 = -adv_t * ratio
-                        policy_loss2 = -adv_t * torch.clamp(
-                            ratio, 1 - self.clip_coef, 1 + self.clip_coef
-                        )
-                        policy_loss_total += torch.max(
-                            policy_loss1, policy_loss2
-                        ).mean()
+                    # Vectorized loss calculations
+                    ratio = torch.exp(new_log_prob_seq - mb_old_log_probs_seq)
+                    policy_loss1 = -mb_advantages_seq * ratio
+                    policy_loss2 = -mb_advantages_seq * torch.clamp(
+                        ratio, 1 - self.clip_coef, 1 + self.clip_coef
+                    )
+                    policy_loss_total = torch.max(policy_loss1, policy_loss2).mean()
 
-                        # Change to clipped value loss accumulation
-                        old_value_t = mb_old_values_seq[:, t]
-                        v_loss_unclipped = (new_value_t - return_t) ** 2
-                        v_clipped = old_value_t + torch.clamp(
-                            new_value_t - old_value_t, -self.clip_coef, self.clip_coef
-                        )
-                        v_loss_clipped = (v_clipped - return_t) ** 2
-                        value_loss_total += (
-                            0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
-                        )
-                        entropy_loss_total += -entropy_t  # entropy_t is already mean
+                    # Vectorized value loss calculation
+                    v_loss_unclipped = (new_value_seq - mb_returns_seq) ** 2
+                    v_clipped = mb_old_values_seq + torch.clamp(
+                        new_value_seq - mb_old_values_seq,
+                        -self.clip_coef,
+                        self.clip_coef,
+                    )
+                    v_loss_clipped = (v_clipped - mb_returns_seq) ** 2
+                    value_loss_total = (
+                        0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+                    )
 
-                        with torch.no_grad():
-                            log_ratio = new_log_prob_t - old_log_prob_t
-                            approx_kl_divs_minibatch_timesteps.append(
-                                ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
-                            )
-                            # Compute clip fraction
-                            clipfrac = torch.mean(
-                                (torch.abs(ratio - 1.0) > self.clip_coef).float()
-                            ).item()
-                            clipfrac_sum += clipfrac
+                    # Vectorized entropy loss
+                    entropy_loss_total = -entropy_seq.mean()
 
-                        if (
-                            self.recurrent
-                            and next_hidden_state_for_actor_step is not None
-                        ):
-                            current_step_hidden_state_actor = (
-                                next_hidden_state_for_actor_step
-                            )
+                    with torch.no_grad():
+                        log_ratio = new_log_prob_seq - mb_old_log_probs_seq
+                        approx_kl = ((torch.exp(log_ratio) - 1) - log_ratio).mean()
+                        approx_kl_divs_minibatch_timesteps = [approx_kl.item()]
+
+                        # Compute clip fraction
+                        clipfrac = torch.mean(
+                            (torch.abs(ratio - 1.0) > self.clip_coef).float()
+                        ).item()
+                        clipfrac_sum = clipfrac
 
                 with self.timing_tracker.time_context("bptt_loss_calculation_time"):
                     loss = (
-                        policy_loss_total / seq_len
-                        + self.vf_coef * (value_loss_total / seq_len)
-                        + self.ent_coef * (entropy_loss_total / seq_len)
+                        policy_loss_total
+                        + self.vf_coef * value_loss_total
+                        + self.ent_coef * entropy_loss_total
                     )
 
                 with self.timing_tracker.time_context("bptt_backward_pass_time"):
@@ -1034,15 +1005,9 @@ class PPO(RLAlgorithm):
 
                 # Track metrics for this minibatch
                 self.learn_metrics.add("total_loss", loss.item())
-                self.learn_metrics.add(
-                    "policy_loss", (policy_loss_total / seq_len).item()
-                )
-                self.learn_metrics.add(
-                    "value_loss", (value_loss_total / seq_len).item()
-                )
-                self.learn_metrics.add(
-                    "entropy_loss", (entropy_loss_total / seq_len).item()
-                )
+                self.learn_metrics.add("policy_loss", policy_loss_total.item())
+                self.learn_metrics.add("value_loss", value_loss_total.item())
+                self.learn_metrics.add("entropy_loss", entropy_loss_total.item())
                 self.learn_metrics.add(
                     "approx_kl",
                     (
@@ -1051,9 +1016,7 @@ class PPO(RLAlgorithm):
                         else 0.0
                     ),
                 )
-                self.learn_metrics.add(
-                    "clip_fraction", clipfrac_sum / seq_len if seq_len > 0 else 0.0
-                )
+                self.learn_metrics.add("clip_fraction", clipfrac_sum)
 
                 num_minibatches_this_epoch += 1
 

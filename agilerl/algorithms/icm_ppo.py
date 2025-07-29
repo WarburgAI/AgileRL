@@ -40,9 +40,40 @@ from agilerl.utils.algo_utils import (
 # encoder hidden state in the rollout buffer, and to use this hidden state
 # for the ICM in the learn() methods.
 class ICMRolloutBuffer(RolloutBuffer):
-    def __init__(self, *args, **kwargs):
+    def __init__(
+        self,
+        *args,
+        use_shared_encoder_for_icm=False,
+        recurrent=False,
+        icm=None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
-        self.encoder_out = np.zeros((self.capacity, self.num_envs), dtype=np.float32)
+        self.use_shared_encoder_for_icm = use_shared_encoder_for_icm
+        self.recurrent = recurrent
+
+        # Add ICM-specific fields with sequence support
+        if self.use_shared_encoder_for_icm:
+            # Store encoder outputs per timestep (will be set based on actual encoder dimension)
+            self.encoder_out = (
+                None  # Will be initialized when we know the encoder dimension
+            )
+        else:
+            # If ICM has its own recurrent hidden states
+            if self.recurrent and icm is not None:
+                try:
+                    icm_hidden_arch = icm.get_hidden_state_architecture()
+                    self.buffer["icm_hidden_states"] = {
+                        k: torch.zeros(
+                            (self.capacity, self.num_envs, *shape[1:]),
+                            dtype=torch.float32,
+                            device="cpu",
+                        )
+                        for k, shape in icm_hidden_arch.items()
+                    }
+                except (AttributeError, NotImplementedError):
+                    # ICM doesn't have hidden state architecture method
+                    pass
 
     def add(
         self,
@@ -53,12 +84,13 @@ class ICMRolloutBuffer(RolloutBuffer):
         done: ArrayOrTensor,
         value: ArrayOrTensor,
         log_prob: ArrayOrTensor,
-        encoder_out: ArrayOrTensor,  # New argument for ICM
+        encoder_out: ArrayOrTensor = None,  # New argument for ICM
+        icm_hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
         next_obs: Optional[ArrayOrTensor] = None,
         hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
         next_hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
     ) -> None:
-        """Add experience, including the ICM 'encoder_out' term, to the buffer."""
+        """Add experience, including ICM-specific data, to the buffer."""
         # Call original add method first
         super().add(
             obs=obs,
@@ -71,13 +103,31 @@ class ICMRolloutBuffer(RolloutBuffer):
             hidden_state=hidden_state,
             next_hidden_state=next_hidden_state,
         )
-        # Store the encoder_output term (adjust index logic if super().add changes self.pos)
-        if self.encoder_out is not None:
-            pos_to_add = (
-                self.pos - 1
-            ) % self.capacity  # Position where last data was added
-            encoder_out = np.asarray(encoder_out)
-            self.encoder_out[pos_to_add] = encoder_out
+
+        pos_to_add = (
+            self.pos - 1
+        ) % self.capacity  # Position where last data was added
+
+        # Store ICM-specific data
+        if self.use_shared_encoder_for_icm and encoder_out is not None:
+            # Initialize encoder_out buffer if needed
+            if self.encoder_out is None:
+                encoder_out_np = np.asarray(encoder_out)
+                encoder_dim = encoder_out_np.shape[-1] if encoder_out_np.ndim > 1 else 1
+                self.encoder_out = np.zeros(
+                    (self.capacity, self.num_envs, encoder_dim), dtype=np.float32
+                )
+
+            encoder_out_np = np.asarray(encoder_out)
+            self.encoder_out[pos_to_add] = encoder_out_np
+        else:
+            # Store ICM hidden states if not using shared encoder
+            if self.recurrent and icm_hidden_state is not None:
+                for key, val in icm_hidden_state.items():
+                    if key in self.buffer.get("icm_hidden_states", {}):
+                        self.buffer["icm_hidden_states"][key][pos_to_add] = val.permute(
+                            1, 0, 2
+                        ).cpu()
 
 
 class ICM_PPO(RLAlgorithm):
@@ -542,8 +592,8 @@ class ICM_PPO(RLAlgorithm):
         self.last_collection_time = 0.0
 
     def create_rollout_buffer(self) -> None:
-        """Creates a rollout buffer with the current configuration and adds space for encoder_out."""
-        self.rollout_buffer = RolloutBuffer(
+        """Creates a rollout buffer with the current configuration and adds space for ICM-specific data."""
+        self.rollout_buffer = ICMRolloutBuffer(
             capacity=self.learn_step,
             observation_space=self.observation_space,
             action_space=self.action_space,
@@ -557,6 +607,9 @@ class ICM_PPO(RLAlgorithm):
                 self.get_hidden_state_architecture() if self.recurrent else None
             ),
             max_seq_len=self.max_seq_len if self.recurrent else None,
+            # ICM-specific parameters
+            use_shared_encoder_for_icm=self.use_shared_encoder_for_icm,
+            icm=self.icm,
             **self.rollout_buffer_config,
         )
 
@@ -697,40 +750,120 @@ class ICM_PPO(RLAlgorithm):
                 deterministic=deterministic,
             )
 
+        # Check if input is sequence (3D) or single step (2D)
+        is_sequence = isinstance(obs, torch.Tensor) and obs.dim() == 3
+
         if hidden_state is not None:
-            latent_pi, next_hidden = self.actor.extract_features(
-                obs, hidden_state=hidden_state
-            )
+            # For recurrent networks, use the updated forward method that handles sequences
+            if is_sequence:
+                # Use actor.forward for sequences which returns all required outputs
+                action, log_prob, entropy, next_hidden = self.actor.forward(
+                    obs, action_mask=action_mask, hidden_state=hidden_state
+                )
+                # Extract features to get latent_pi for all timesteps
+                latent_pi, _ = self.actor.extract_features(
+                    obs, hidden_state=hidden_state
+                )
 
-            action, log_prob, entropy = self.actor.forward_head(
-                latent_pi,
-                action_mask=action_mask,
-                sample=sample,
-                deterministic=deterministic,
-            )
-
-            if self.share_encoders:
-                values = self.critic.forward_head(latent_pi).squeeze(-1)
+                if self.share_encoders:
+                    values = self.critic.forward_head(latent_pi).squeeze(-1)
+                else:
+                    values, next_hidden_critic = self.critic(
+                        obs, hidden_state=hidden_state
+                    )
+                    values = values.squeeze(-1)
+                    # Update hidden state with critic's output if needed
+                    if next_hidden_critic is not None:
+                        next_hidden.update(next_hidden_critic)
             else:
-                values, next_hidden = self.critic(obs, hidden_state=next_hidden)
-                values = values.squeeze(-1)
+                # Single timestep processing (existing logic)
+                latent_pi, next_hidden = self.actor.extract_features(
+                    obs, hidden_state=hidden_state
+                )
+
+                action, log_prob, entropy = self.actor.forward_head(
+                    latent_pi,
+                    action_mask=action_mask,
+                    sample=sample,
+                    deterministic=deterministic,
+                )
+
+                if self.share_encoders:
+                    values = self.critic.forward_head(latent_pi).squeeze(-1)
+                else:
+                    values, next_hidden = self.critic(obs, hidden_state=next_hidden)
+                    values = values.squeeze(-1)
 
             return action, log_prob, entropy, values, next_hidden, latent_pi
         else:
-            latent_pi = self.actor.extract_features(obs)
-            action, log_prob, entropy = self.actor.forward_head(
-                latent_pi,
-                action_mask=action_mask,
-                sample=sample,
-                deterministic=deterministic,
-            )
-            values = (
-                self.critic.forward_head(latent_pi).squeeze(-1)
-                if self.share_encoders
-                else self.critic(obs).squeeze(-1)
-            )
+            if is_sequence:
+                # Sequence without hidden state - use forward methods that handle sequences
+                action, log_prob, entropy = self.actor.forward(
+                    obs, action_mask=action_mask
+                )
+                latent_pi = self.actor.extract_features(obs)
+                values = (
+                    self.critic.forward_head(latent_pi).squeeze(-1)
+                    if self.share_encoders
+                    else self.critic(obs).squeeze(-1)
+                )
+            else:
+                # Single timestep processing (existing logic)
+                latent_pi = self.actor.extract_features(obs)
+                action, log_prob, entropy = self.actor.forward_head(
+                    latent_pi,
+                    action_mask=action_mask,
+                    sample=sample,
+                    deterministic=deterministic,
+                )
+                values = (
+                    self.critic.forward_head(latent_pi).squeeze(-1)
+                    if self.share_encoders
+                    else self.critic(obs).squeeze(-1)
+                )
 
             return action, log_prob, entropy, values, None, latent_pi
+
+    def _compute_sequence_action_log_probs(self, actions, obs, hidden_state):
+        """Compute action log probabilities for sequence data.
+
+        This method handles the case where we have sequence actions but need to compute
+        log probabilities step by step to match the sequence length.
+
+        :param actions: Sequence actions (batch, seq_len, action_dim)
+        :param obs: Sequence observations (batch, seq_len, obs_dim)
+        :param hidden_state: Initial hidden state
+        :return: Sequence log probabilities (batch, seq_len)
+        """
+        batch_size, seq_len = actions.shape[:2]
+
+        # Initialize storage for log probabilities
+        log_probs = []
+        current_hidden = hidden_state
+
+        # Process each timestep to get proper log probabilities
+        for t in range(seq_len):
+            obs_t = obs[:, t] if obs.dim() == 3 else obs  # Handle 2D obs
+            action_t = actions[:, t]
+
+            # Get features for this timestep
+            latent_pi_t, next_hidden = self.actor.extract_features(
+                obs_t, hidden_state=current_hidden
+            )
+
+            # Use the actor's action_log_prob method which handles the distribution properly
+            # We need to create a mock forward pass to set up the distribution
+            _, _, _ = self.actor.forward_head(latent_pi_t, sample=False)
+
+            # Now compute log probability for this timestep's action
+            log_prob_t = self.actor.action_log_prob(action_t)
+            log_probs.append(log_prob_t)
+
+            # Update hidden state for next timestep
+            current_hidden = next_hidden
+
+        # Stack all timestep log probabilities
+        return torch.stack(log_probs, dim=1)  # (batch, seq_len)
 
     def evaluate_actions(
         self,
@@ -1290,13 +1423,9 @@ class ICM_PPO(RLAlgorithm):
                         learn_by_bptt=True,
                         old_values=mb_old_values_seq,
                     )
-                loss = loss_dict["loss"]
-
-                if self.use_shared_encoder_for_icm:
-                    loss = (
-                        self.icm_loss_weight * loss_dict["icm_total_loss"]
-                        + (1 - self.icm_loss_weight) * loss
-                    )
+                loss = loss_dict[
+                    "loss"
+                ]  # Loss combination is already handled in compute_loss
 
                 with self.timing_tracker.time_context("bptt_backward_pass_time"):
                     self.optimizer.zero_grad()
@@ -1387,148 +1516,116 @@ class ICM_PPO(RLAlgorithm):
             if seq_len is None:
                 seq_len = self.max_seq_len
 
-            # Common BPTT processing logic for the current minibatch
-            policy_loss_total = 0.0
-            value_loss_total = 0.0
-            entropy_loss_total = 0.0
-            icm_total_loss = 0.0
-            icm_i_loss = 0.0
-            icm_f_loss = 0.0
-            approx_kl = 0.0
-            clip_fraction = 0.0
+            # Vectorized BPTT: Get full seq outputs in one call
+            (
+                _,
+                new_log_prob_seq,
+                entropy_seq,
+                new_value_seq,
+                next_hidden_state,
+                latent_pi_seq,
+            ) = self._get_action_and_values(
+                obs, hidden_state=hidden_state, sample=False
+            )
+
+            # For BPTT, we need to compute action log probabilities for the actual sequence actions
+            # The issue is that we need to ensure the actor can compute log probs for sequence actions
+            new_log_prob_seq = self._compute_sequence_action_log_probs(
+                actions, obs, hidden_state
+            )
+
+            # Handle entropy - ensure it's per timestep if needed
+            if entropy_seq is None:
+                entropy_seq = -new_log_prob_seq  # Use negative log prob as entropy
+
+            # Vectorized PPO loss calculations
+            ratio = torch.exp(new_log_prob_seq - old_log_probs)
+            policy_loss1 = -advantages * ratio
+            policy_loss2 = -advantages * torch.clamp(
+                ratio, 1 - self.clip_coef, 1 + self.clip_coef
+            )
+            policy_loss = torch.max(policy_loss1, policy_loss2).mean()
+
+            # Vectorized value loss calculation
+            if old_values is not None:
+                v_loss_unclipped = (new_value_seq - returns) ** 2
+                v_clipped = old_values + torch.clamp(
+                    new_value_seq - old_values, -self.clip_coef, self.clip_coef
+                )
+                v_loss_clipped = (v_clipped - returns) ** 2
+                value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+            else:
+                value_loss = 0.5 * ((new_value_seq - returns) ** 2).mean()
+
+            # Vectorized entropy loss
+            entropy_loss = -entropy_seq.mean()
+
+            # Vectorized ICM losses (if using shared encoder)
+            icm_total_loss = torch.tensor(0.0, device=obs.device)
+            icm_i_loss = torch.tensor(0.0, device=obs.device)
+            icm_f_loss = torch.tensor(0.0, device=obs.device)
 
             if self.use_shared_encoder_for_icm:
-                latent_pi = latent_pi[:, 0] if latent_pi is not None else None
+                # ICM losses (vectorized over sequences)
+                # Flatten sequence tensors to 2D for ICM processing
+                batch_size, seq_len_minus_1 = actions.shape[0], actions.shape[1] - 1
 
-            for t in range(seq_len):
-                if isinstance(obs, dict):
-                    obs_t = {k_obs: v_obs[:, t] for k_obs, v_obs in obs.items()}
-                else:
-                    obs_t = obs[:, t]
+                actions_t_flat = actions[:, :-1].reshape(
+                    batch_size * seq_len_minus_1, -1
+                )  # (batch*seq, action_dim)
+                obs_t_flat = obs[:, :-1].reshape(
+                    batch_size * seq_len_minus_1, -1
+                )  # (batch*seq, obs_dim)
+                next_obs_t_flat = obs[:, 1:].reshape(
+                    batch_size * seq_len_minus_1, -1
+                )  # (batch*seq, obs_dim)
+                embedded_obs_t_flat = latent_pi_seq[:, :-1].reshape(
+                    batch_size * seq_len_minus_1, -1
+                )  # (batch*seq, latent_dim)
+                embedded_next_obs_t_flat = latent_pi_seq[:, 1:].reshape(
+                    batch_size * seq_len_minus_1, -1
+                )  # (batch*seq, latent_dim)
 
-                actions_t = actions[:, t]
-                old_log_prob_t = old_log_probs[:, t]
-                adv_t = advantages[:, t]
-                return_t = returns[:, t]
-
-                returned_tuple = self._get_action_and_values(
-                    obs_t,
-                    hidden_state=hidden_state,  # Pass dict (layers, batch, size)
-                    sample=False,
+                icm_total_loss, icm_i_loss, icm_f_loss, _, _ = self.icm.compute_loss(
+                    action_batch_t=actions_t_flat,
+                    obs_batch_t=obs_t_flat,
+                    next_obs_batch_t=next_obs_t_flat,
+                    embedded_obs=embedded_obs_t_flat,
+                    embedded_next_obs=embedded_next_obs_t_flat,
+                    hidden_state=hidden_state,
+                    hidden_state_next=next_hidden_state,
                 )
 
-                if self.use_shared_encoder_for_icm:
-                    (
-                        _,
-                        _,
-                        entropy_t,
-                        new_value_t,
-                        next_hidden_state_for_step,
-                        next_latent_pi,
-                    ) = returned_tuple
-                else:
-                    _, _, entropy_t, new_value_t, next_hidden_state_for_step = (
-                        returned_tuple
-                    )
+            ppo_loss = (
+                policy_loss + self.vf_coef * value_loss + self.ent_coef * entropy_loss
+            )
 
-                new_log_prob_t = self.actor.action_log_prob(actions_t)
-                if entropy_t is None:
-                    entropy_t = (
-                        -new_log_prob_t.mean()
-                    )  # Ensure entropy_t is scalar if new_log_prob_t is not
-                else:
-                    entropy_t = entropy_t.mean()  # Ensure scalar
+            # Combine PPO and ICM losses
+            if self.use_shared_encoder_for_icm:
+                total_loss = (
+                    1 - self.icm_loss_weight
+                ) * ppo_loss + self.icm_loss_weight * icm_total_loss
+            else:
+                total_loss = ppo_loss
 
-                ratio = torch.exp(new_log_prob_t - old_log_prob_t)
-                policy_loss1 = -adv_t * ratio
-                policy_loss2 = -adv_t * torch.clamp(
-                    ratio, 1 - self.clip_coef, 1 + self.clip_coef
+            # Vectorized metrics calculation
+            with torch.no_grad():
+                log_ratio = new_log_prob_seq - old_log_probs
+                approx_kl = ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
+                clip_fraction = (
+                    (torch.abs(ratio - 1.0) > self.clip_coef).float().mean().item()
                 )
-                policy_loss = torch.max(policy_loss1, policy_loss2).mean()
-
-                # Implement value clipping
-                if old_values is not None:
-                    old_value_t = old_values[:, t]
-                    v_loss_unclipped = (new_value_t - return_t) ** 2
-                    v_clipped = old_value_t + torch.clamp(
-                        new_value_t - old_value_t, -self.clip_coef, self.clip_coef
-                    )
-                    v_loss_clipped = (v_clipped - return_t) ** 2
-                    value_loss = (
-                        0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
-                    )
-                else:
-                    value_loss = 0.5 * ((new_value_t - return_t) ** 2).mean()
-
-                entropy_step_loss = -entropy_t  # entropy_t is already mean
-
-                policy_loss_total += policy_loss
-                value_loss_total += value_loss
-                entropy_loss_total += entropy_step_loss
-
-                if self.use_shared_encoder_for_icm:
-                    icm_total_loss_step, icm_i_loss_step, icm_f_loss_step, _, _ = (
-                        self.icm.compute_loss(
-                            action_batch_t=actions_t,
-                            obs_batch_t=obs_t,
-                            next_obs_batch_t=obs_t,
-                            embedded_obs=latent_pi,
-                            embedded_next_obs=next_latent_pi,
-                            hidden_state=hidden_state,
-                            hidden_state_next=hidden_state,
-                        )
-                    )
-                    icm_total_loss += icm_total_loss_step
-                    icm_i_loss += icm_i_loss_step
-                    icm_f_loss += icm_f_loss_step
-
-                with torch.no_grad():
-                    log_ratio = new_log_prob_t - old_log_prob_t
-                    approx_kl += ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
-                    clip_fraction += torch.mean(
-                        (torch.abs(ratio - 1.0) > self.clip_coef).float()
-                    ).item()
-
-                if self.recurrent and next_hidden_state_for_step is not None:
-                    hidden_state = (
-                        next_hidden_state_for_step  # Already (layers, batch, size)
-                    )
-                    if self.use_shared_encoder_for_icm:
-                        latent_pi = next_latent_pi
-
-            # Average losses over sequence length
-            policy_loss_avg_over_seq = policy_loss_total / seq_len
-            value_loss_avg_over_seq = value_loss_total / seq_len
-            entropy_loss_avg_over_seq = entropy_loss_total / seq_len
-            icm_total_loss_avg_over_seq = icm_total_loss / seq_len
-            icm_i_loss_avg_over_seq = icm_i_loss / seq_len
-            icm_f_loss_avg_over_seq = icm_f_loss / seq_len
-            approx_kl /= seq_len
-            clip_fraction /= seq_len
-
-            loss = (
-                policy_loss_avg_over_seq
-                + self.vf_coef * value_loss_avg_over_seq
-                + self.ent_coef * entropy_loss_avg_over_seq
-            )
-
-            loss = (
-                self.icm_loss_weight * icm_total_loss_avg_over_seq
-                + (1 - self.icm_loss_weight) * loss
-                if self.use_shared_encoder_for_icm
-                else loss
-            )
 
             return {
-                "loss": loss,
-                "policy_loss": policy_loss_avg_over_seq,
-                "value_loss": value_loss_avg_over_seq,
-                "entropy_loss": entropy_loss_avg_over_seq,
+                "loss": total_loss,
+                "policy_loss": policy_loss,
+                "value_loss": value_loss,
+                "entropy_loss": entropy_loss,
                 "approx_kl": approx_kl,
                 "clip_fraction": clip_fraction,
-                "icm_total_loss": icm_total_loss_avg_over_seq,
-                "icm_i_loss": icm_i_loss_avg_over_seq,
-                "icm_f_loss": icm_f_loss_avg_over_seq,
+                "icm_total_loss": icm_total_loss,
+                "icm_i_loss": icm_i_loss,
+                "icm_f_loss": icm_f_loss,
             }
         else:
             # Get values and next hidden state (which we ignore in flat learning)
