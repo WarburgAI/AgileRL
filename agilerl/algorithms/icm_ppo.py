@@ -203,6 +203,7 @@ class ICM_PPO(RLAlgorithm):
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
+        torch_compiler: Optional[Any] = None,
         bptt_sequence_type: BPTTSequenceType = BPTTSequenceType.CHUNKED,
         # ICM specific parameters
         icm_lr: float = 1e-4,
@@ -222,6 +223,7 @@ class ICM_PPO(RLAlgorithm):
             device=device,
             accelerator=accelerator,
             normalize_images=normalize_images,
+            torch_compiler=torch_compiler,
             name="ICM_PPO",
         )
 

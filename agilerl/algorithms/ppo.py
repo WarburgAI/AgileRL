@@ -127,6 +127,7 @@ class PPO(RLAlgorithm):
         accelerator: Optional[Any] = None,
         wrap: bool = True,
         bptt_sequence_type: BPTTSequenceType = BPTTSequenceType.CHUNKED,
+        torch_compiler: Optional[Any] = None,
     ) -> None:
         super().__init__(
             observation_space,
@@ -136,6 +137,7 @@ class PPO(RLAlgorithm):
             device=device,
             accelerator=accelerator,
             normalize_images=normalize_images,
+            torch_compiler=torch_compiler,
             name="PPO",
         )
 

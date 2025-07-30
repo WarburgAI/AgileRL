@@ -354,6 +354,7 @@ def create_population(
                 device=device,
                 accelerator=accelerator,
                 num_envs=num_envs,
+                torch_compiler=torch_compiler,
                 **algo_kwargs,
             )
             population.append(agent)
@@ -631,6 +632,7 @@ def create_population(
                 device=device,
                 accelerator=accelerator,
                 num_envs=num_envs,
+                torch_compiler=torch_compiler,
                 **algo_kwargs,
             )
             population.append(agent)
