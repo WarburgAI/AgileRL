@@ -119,6 +119,7 @@ def compile_model(
             }
         )
         compiled_model.last_mutation_attr = model.last_mutation_attr
+        print(f"Compiled model: {compiled_model}")
         return compiled_model
 
     if not isinstance(model, OptimizedModule) and mode is not None:

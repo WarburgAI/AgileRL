@@ -226,19 +226,20 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         torch_compiler: Optional[Any] = None,
         name: Optional[str] = None,
     ) -> None:
-
         assert isinstance(index, int), "Agent index must be an integer."
         assert isinstance(device, (str, torch.device)), "Device must be a string."
         assert isinstance(name, (type(None), str)), "Name must be a string."
-        assert isinstance(
-            accelerator, (type(None), Accelerator)
-        ), "Accelerator must be an instance of Accelerator."
+        assert isinstance(accelerator, (type(None), Accelerator)), (
+            "Accelerator must be an instance of Accelerator."
+        )
         if torch_compiler:
             assert torch_compiler in [
                 "default",
                 "reduce-overhead",
                 "max-autotune",
-            ], "Choose between torch compiler modes: default, reduce-overhead, max-autotune or None"
+            ], (
+                "Choose between torch compiler modes: default, reduce-overhead, max-autotune or None"
+            )
 
         self.accelerator = accelerator
         self.device = device if self.accelerator is None else self.accelerator.device
@@ -1172,15 +1173,14 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         normalize_images: bool = True,
         name: Optional[str] = None,
     ) -> None:
-
         super().__init__(index, hp_config, device, accelerator, torch_compiler, name)
 
-        assert isinstance(
-            observation_space, spaces.Space
-        ), "Observation space must be an instance of gymnasium.spaces.Space."
-        assert isinstance(
-            action_space, spaces.Space
-        ), "Action space must be an instance of gymnasium.spaces.Space."
+        assert isinstance(observation_space, spaces.Space), (
+            "Observation space must be an instance of gymnasium.spaces.Space."
+        )
+        assert isinstance(action_space, spaces.Space), (
+            "Action space must be an instance of gymnasium.spaces.Space."
+        )
 
         self.observation_space = observation_space
         self.action_space = action_space
@@ -1253,7 +1253,6 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         placeholder_value: Optional[Any] = -1,
         name: Optional[str] = None,
     ) -> None:
-
         super().__init__(index, hp_config, device, accelerator, torch_compiler, name)
 
         assert type(observation_spaces) is type(action_spaces), (
@@ -1262,18 +1261,18 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         )
 
         if isinstance(observation_spaces, (list, tuple)):
-            assert isinstance(
-                agent_ids, (tuple, list)
-            ), "Agent IDs must be specified if observation spaces are passed as a list."
-            assert len(agent_ids) == len(
-                observation_spaces
-            ), "Number of agent IDs must match number of observation spaces."
+            assert isinstance(agent_ids, (tuple, list)), (
+                "Agent IDs must be specified if observation spaces are passed as a list."
+            )
+            assert len(agent_ids) == len(observation_spaces), (
+                "Number of agent IDs must match number of observation spaces."
+            )
             assert all(
                 isinstance(_space, spaces.Space) for _space in observation_spaces
             ), "Observation spaces must be instances of gymnasium.spaces.Space."
-            assert all(
-                isinstance(_space, spaces.Space) for _space in action_spaces
-            ), "Action spaces must be instances of gymnasium.spaces.Space."
+            assert all(isinstance(_space, spaces.Space) for _space in action_spaces), (
+                "Action spaces must be instances of gymnasium.spaces.Space."
+            )
             self.possible_observation_spaces = spaces.Dict(
                 {
                     agent_id: space
@@ -1813,12 +1812,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         name: Optional[str] = None,
     ) -> None:
         super().__init__(index, hp_config, device, accelerator, None, name)
-        assert isinstance(
-            observation_space, spaces.Space
-        ), "Observation space must be an instance of gymnasium.spaces.Space."
-        assert isinstance(
-            action_space, spaces.Space
-        ), "Action space must be an instance of gymnasium.spaces.Space."
+        assert isinstance(observation_space, spaces.Space), (
+            "Observation space must be an instance of gymnasium.spaces.Space."
+        )
+        assert isinstance(action_space, spaces.Space), (
+            "Action space must be an instance of gymnasium.spaces.Space."
+        )
 
         self.observation_space = observation_space
         self.action_space = action_space
@@ -1956,9 +1955,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
         if self.accelerator is not None:
             os.makedirs(path, exist_ok=True)
-            assert (
-                self.actor is not None
-            ), "Actor is not defined, please check that the actor is defined."
+            assert self.actor is not None, (
+                "Actor is not defined, please check that the actor is defined."
+            )
             self.actor.save_checkpoint(path, tag=tag)
             self.actor.set_adapter("actor")
         else:
@@ -2005,9 +2004,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """Wrap the models in the accelerator, DeepSpeed objects must be wrapped at the same time,
         not individually."""
         if self.accelerator is not None:
-            assert (
-                self.optimizer is not None
-            ), "Optimizer is set to None, please check that the optimizer is correctly defined."
+            assert self.optimizer is not None, (
+                "Optimizer is set to None, please check that the optimizer is correctly defined."
+            )
             is_dummy_optimizer = isinstance(self.optimizer.optimizer, DummyOptimizer)
             self.actor, optimizer, self.lr_scheduler = self.accelerator.prepare(
                 self.actor, self.optimizer.optimizer, self.lr_scheduler
@@ -2021,9 +2020,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 else type(self.actor.optimizer)
             )
         else:
-            assert (
-                self.actor is not None
-            ), "Actor is set to None, please check that the actor is defined."
+            assert self.actor is not None, (
+                "Actor is set to None, please check that the actor is defined."
+            )
             self.actor = self.actor.to(self.device)
             self.actor.gradient_checkpointing_enable()
 
@@ -2066,7 +2065,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :rtype: EvolvableAlgorithm
         """
         with tempfile.TemporaryDirectory() as temp_dir:
-
             # We need to use the same temp_dir for all processes, so we broadcast the temp_dir from the main process
             if self.accelerator is not None and self.accelerator.num_processes > 1:
                 temp_dir = broadcast_object_list([temp_dir], from_process=0)[0]
