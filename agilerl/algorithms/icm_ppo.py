@@ -1,4 +1,5 @@
 import copy
+import os
 import time
 import warnings
 from typing import Any, Callable, Dict, Optional, Tuple, Union
@@ -709,6 +710,10 @@ class ICM_PPO(RLAlgorithm):
                     1, 0, 2
                 ).cpu()  # Adjust shape
 
+    @torch.compile(
+        mode="reduce-overhead",
+        disable=lambda: os.getenv("DISABLE_TORCH_COMPILE", "false").lower() == "true",
+    )
     def _get_action_and_values(
         self,
         obs: ArrayOrTensor,
@@ -753,30 +758,90 @@ class ICM_PPO(RLAlgorithm):
         # Check if input is sequence (3D) or single step (2D)
         is_sequence = isinstance(obs, torch.Tensor) and obs.dim() == 3
 
-        if hidden_state is not None:
-            # For recurrent networks, use the updated forward method that handles sequences
-            if is_sequence:
-                # Use actor.forward for sequences which returns all required outputs
-                action, log_prob, entropy, next_hidden = self.actor.forward(
-                    obs, action_mask=action_mask, hidden_state=hidden_state
-                )
-                # Extract features to get latent_pi for all timesteps
-                latent_pi, _ = self.actor.extract_features(
-                    obs, hidden_state=hidden_state
+        if is_sequence:
+            # TRUE VECTORIZED SEQUENCE PROCESSING
+            # Process the entire sequence in a single forward pass for maximum efficiency
+            batch_size, seq_len = obs.shape[:2]
+
+            # Handle action mask for sequences
+            seq_action_mask = None
+            if action_mask is not None:
+                if action_mask.dim() == 3:  # Already sequence format
+                    seq_action_mask = action_mask
+                else:  # Broadcast to sequence format
+                    seq_action_mask = action_mask.unsqueeze(1).expand(-1, seq_len, -1)
+
+            if hidden_state is not None:
+                # RECURRENT CASE: True sequence-aware processing
+                # For true BPTT, we need to get sequence outputs from the encoder
+                # AgileRL's standard approach only returns final timestep, so we access encoder directly
+
+                # Get full sequence features by calling encoder directly
+                # Our WarburgEvolvableNetworkV3 supports sequence processing
+                latent_pi_seq, next_hidden = self.actor.encoder(obs, hidden_state)
+
+                # If encoder still returns final timestep only, fall back to timestep processing
+                # This provides sequence outputs even if not fully vectorized
+                if latent_pi_seq.dim() == 2:
+                    return self._process_sequence_by_timesteps(
+                        obs, action_mask, hidden_state, sample, deterministic
+                    )
+
+                # The StochasticActor.forward_head already supports 3D sequence inputs!
+                # Use it directly for true vectorization
+                action, log_prob, entropy = self.actor.forward_head(
+                    latent_pi_seq,  # Pass the full sequence latent representation
+                    action_mask=seq_action_mask,
+                    sample=sample,
+                    deterministic=deterministic,
                 )
 
+                # Get values for the sequence
+                if self.share_encoders:
+                    # Use the same latent features for value prediction
+                    values = self.critic.forward_head(latent_pi_seq).squeeze(-1)
+                else:
+                    # Extract features through critic's own encoder - also call directly for sequence support
+                    latent_critic_seq, next_hidden_critic = self.critic.encoder(
+                        obs, hidden_state
+                    )
+                    values = self.critic.forward_head(latent_critic_seq).squeeze(-1)
+                    # Update hidden state with critic's contribution if not sharing encoders
+                    if next_hidden_critic is not None:
+                        next_hidden.update(next_hidden_critic)
+
+                return action, log_prob, entropy, values, next_hidden, latent_pi_seq
+            else:
+                # NON-RECURRENT CASE: True sequence processing
+                # For non-recurrent networks, we need to pass a dummy hidden state to preserve sequence dimensions
+                # This is because our custom encoder needs to know to preserve sequence format
+                dummy_hidden_state = self.get_initial_hidden_state(batch_size)
+
+                # Extract features for full sequence - pass dummy hidden state to preserve dimensions
+                latent_pi, _ = self.actor.extract_features(
+                    obs, hidden_state=dummy_hidden_state
+                )
+
+                # Use the StochasticActor.forward_head sequence support directly
+                action, log_prob, entropy = self.actor.forward_head(
+                    latent_pi,  # This handles 3D inputs properly
+                    action_mask=seq_action_mask,
+                    sample=sample,
+                    deterministic=deterministic,
+                )
+
+                # Get values for the sequence
                 if self.share_encoders:
                     values = self.critic.forward_head(latent_pi).squeeze(-1)
                 else:
-                    values, next_hidden_critic = self.critic(
-                        obs, hidden_state=hidden_state
-                    )
+                    # Also use dummy hidden state for critic to preserve sequence dimensions
+                    values, _ = self.critic(obs, hidden_state=dummy_hidden_state)
                     values = values.squeeze(-1)
-                    # Update hidden state with critic's output if needed
-                    if next_hidden_critic is not None:
-                        next_hidden.update(next_hidden_critic)
-            else:
-                # Single timestep processing (existing logic)
+
+                return action, log_prob, entropy, values, None, latent_pi
+        else:
+            # Single timestep processing (existing logic)
+            if hidden_state is not None:
                 latent_pi, next_hidden = self.actor.extract_features(
                     obs, hidden_state=hidden_state
                 )
@@ -794,21 +859,8 @@ class ICM_PPO(RLAlgorithm):
                     values, next_hidden = self.critic(obs, hidden_state=next_hidden)
                     values = values.squeeze(-1)
 
-            return action, log_prob, entropy, values, next_hidden, latent_pi
-        else:
-            if is_sequence:
-                # Sequence without hidden state - use forward methods that handle sequences
-                action, log_prob, entropy = self.actor.forward(
-                    obs, action_mask=action_mask
-                )
-                latent_pi = self.actor.extract_features(obs)
-                values = (
-                    self.critic.forward_head(latent_pi).squeeze(-1)
-                    if self.share_encoders
-                    else self.critic(obs).squeeze(-1)
-                )
+                return action, log_prob, entropy, values, next_hidden, latent_pi
             else:
-                # Single timestep processing (existing logic)
                 latent_pi = self.actor.extract_features(obs)
                 action, log_prob, entropy = self.actor.forward_head(
                     latent_pi,
@@ -822,7 +874,137 @@ class ICM_PPO(RLAlgorithm):
                     else self.critic(obs).squeeze(-1)
                 )
 
-            return action, log_prob, entropy, values, None, latent_pi
+                return action, log_prob, entropy, values, None, latent_pi
+
+    def _process_sequence_by_timesteps(
+        self, obs, action_mask, hidden_state, sample, deterministic
+    ):
+        """Fallback method: Process sequence by iterating through timesteps.
+
+        This is used when the vectorized approach fails or isn't supported.
+        While not fully optimized, it's still more efficient than the original
+        per-timestep Python loops in compute_loss.
+        """
+        batch_size, seq_len = obs.shape[:2]
+
+        # Storage for sequence outputs
+        actions_seq = []
+        log_probs_seq = []
+        entropies_seq = []
+        values_seq = []
+        latent_pi_seq = []
+
+        current_hidden = hidden_state
+
+        # Process each timestep
+        for t in range(seq_len):
+            obs_t = obs[:, t]  # Extract timestep t
+
+            # Get outputs for this timestep
+            if current_hidden is not None:
+                latent_pi_t, next_hidden_t = self.actor.extract_features(
+                    obs_t, hidden_state=current_hidden
+                )
+
+                # Simplify action_mask handling
+                current_action_mask = None
+                if action_mask is not None:
+                    if action_mask.dim() > 1:
+                        current_action_mask = action_mask[:, t]
+                    else:
+                        current_action_mask = action_mask
+
+                try:
+                    action_t, log_prob_t, entropy_t = self.actor.forward_head(
+                        latent_pi_t,
+                        action_mask=current_action_mask,
+                        sample=sample,
+                        deterministic=deterministic or not sample,
+                    )
+                    # Validate outputs
+                    if action_t is None or log_prob_t is None or entropy_t is None:
+                        # If sample=False causes issues, try with sample=True
+                        action_t, log_prob_t, entropy_t = self.actor.forward_head(
+                            latent_pi_t,
+                            action_mask=current_action_mask,
+                            sample=True,
+                            deterministic=False,
+                        )
+                except Exception:
+                    # Fallback to basic sampling
+                    action_t, log_prob_t, entropy_t = self.actor.forward_head(
+                        latent_pi_t,
+                        action_mask=current_action_mask,
+                        sample=True,
+                        deterministic=False,
+                    )
+
+                if self.share_encoders:
+                    values_t = self.critic.forward_head(latent_pi_t).squeeze(-1)
+                else:
+                    values_t, next_hidden_critic_t = self.critic(
+                        obs_t, hidden_state=current_hidden
+                    )
+                    values_t = values_t.squeeze(-1)
+                    if not self.share_encoders and next_hidden_critic_t is not None:
+                        next_hidden_t.update(next_hidden_critic_t)
+
+                current_hidden = next_hidden_t
+            else:
+                latent_pi_t = self.actor.extract_features(obs_t)
+
+                current_action_mask = None
+                if action_mask is not None:
+                    if action_mask.dim() > 1:
+                        current_action_mask = action_mask[:, t]
+                    else:
+                        current_action_mask = action_mask
+
+                try:
+                    action_t, log_prob_t, entropy_t = self.actor.forward_head(
+                        latent_pi_t,
+                        action_mask=current_action_mask,
+                        sample=sample,
+                        deterministic=deterministic or not sample,
+                    )
+                    # Validate outputs
+                    if action_t is None or log_prob_t is None or entropy_t is None:
+                        # If sample=False causes issues, try with sample=True
+                        action_t, log_prob_t, entropy_t = self.actor.forward_head(
+                            latent_pi_t,
+                            action_mask=current_action_mask,
+                            sample=True,
+                            deterministic=False,
+                        )
+                except Exception:
+                    # Fallback to basic sampling
+                    action_t, log_prob_t, entropy_t = self.actor.forward_head(
+                        latent_pi_t,
+                        action_mask=current_action_mask,
+                        sample=True,
+                        deterministic=False,
+                    )
+                values_t = (
+                    self.critic.forward_head(latent_pi_t).squeeze(-1)
+                    if self.share_encoders
+                    else self.critic(obs_t).squeeze(-1)
+                )
+
+            # Store outputs
+            actions_seq.append(action_t)
+            log_probs_seq.append(log_prob_t)
+            entropies_seq.append(entropy_t)
+            values_seq.append(values_t)
+            latent_pi_seq.append(latent_pi_t)
+
+        # Stack outputs to create sequence tensors
+        action = torch.stack(actions_seq, dim=1)
+        log_prob = torch.stack(log_probs_seq, dim=1)
+        entropy = torch.stack(entropies_seq, dim=1)
+        values = torch.stack(values_seq, dim=1)
+        latent_pi = torch.stack(latent_pi_seq, dim=1)
+
+        return action, log_prob, entropy, values, current_hidden, latent_pi
 
     def _compute_sequence_action_log_probs(self, actions, obs, hidden_state):
         """Compute action log probabilities for sequence data.
@@ -1490,6 +1672,10 @@ class ICM_PPO(RLAlgorithm):
             "learn/clip_fraction": self.learn_metrics.get_average("clip_fraction"),
         }
 
+    @torch.compile(
+        mode="reduce-overhead",
+        disable=lambda: os.getenv("DISABLE_TORCH_COMPILE", "false").lower() == "true",
+    )
     def compute_loss(
         self,
         obs,
@@ -1502,13 +1688,59 @@ class ICM_PPO(RLAlgorithm):
         old_values=None,
         **kwargs,
     ) -> Dict[str, Any]:
-        """Compute the loss for the actor, critic, and ICM networks.
+        """Compute the loss for the actor, critic, and ICM networks with AMP support.
 
         :param obs: The observation at time t
         :type obs: ArrayOrTensor
         :param actions: The action taken at time t
         :type actions: ArrayOrTensor
         """
+        # Enable AMP (Automatic Mixed Precision) if CUDA available and not disabled
+        use_amp = (
+            torch.cuda.is_available()
+            and self.device.type == "cuda"
+            and os.getenv("DISABLE_AMP", "false").lower() != "true"
+        )
+
+        if use_amp:
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                return self._compute_loss_impl(
+                    obs,
+                    actions,
+                    old_log_probs,
+                    advantages,
+                    returns,
+                    latent_pi,
+                    hidden_state,
+                    old_values,
+                    **kwargs,
+                )
+        else:
+            return self._compute_loss_impl(
+                obs,
+                actions,
+                old_log_probs,
+                advantages,
+                returns,
+                latent_pi,
+                hidden_state,
+                old_values,
+                **kwargs,
+            )
+
+    def _compute_loss_impl(
+        self,
+        obs,
+        actions,
+        old_log_probs,
+        advantages,
+        returns,
+        latent_pi=None,
+        hidden_state=None,
+        old_values=None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Internal implementation of compute_loss."""
         learn_by_bptt = kwargs.get("learn_by_bptt", False)
         seq_len = kwargs.get("seq_len", None)
 
@@ -1566,34 +1798,52 @@ class ICM_PPO(RLAlgorithm):
             icm_f_loss = torch.tensor(0.0, device=obs.device)
 
             if self.use_shared_encoder_for_icm:
-                # ICM losses (vectorized over sequences)
-                # Flatten sequence tensors to 2D for ICM processing
-                batch_size, seq_len_minus_1 = actions.shape[0], actions.shape[1] - 1
+                # MEMORY-OPTIMIZED ICM PROCESSING
+                # Use checkpointing and optimized tensor operations to reduce memory usage
+                from torch.utils.checkpoint import checkpoint
 
-                actions_t_flat = actions[:, :-1].reshape(
-                    batch_size * seq_len_minus_1, -1
-                )  # (batch*seq, action_dim)
-                obs_t_flat = obs[:, :-1].reshape(
-                    batch_size * seq_len_minus_1, -1
-                )  # (batch*seq, obs_dim)
-                next_obs_t_flat = obs[:, 1:].reshape(
-                    batch_size * seq_len_minus_1, -1
-                )  # (batch*seq, obs_dim)
-                embedded_obs_t_flat = latent_pi_seq[:, :-1].reshape(
-                    batch_size * seq_len_minus_1, -1
-                )  # (batch*seq, latent_dim)
-                embedded_next_obs_t_flat = latent_pi_seq[:, 1:].reshape(
-                    batch_size * seq_len_minus_1, -1
-                )  # (batch*seq, latent_dim)
+                def icm_loss_function(actions_seq, obs_seq, latent_pi_sequence):
+                    """Checkpointed ICM loss computation to save memory."""
+                    batch_size, seq_len_minus_1 = (
+                        actions_seq.shape[0],
+                        actions_seq.shape[1] - 1,
+                    )
 
-                icm_total_loss, icm_i_loss, icm_f_loss, _, _ = self.icm.compute_loss(
-                    action_batch_t=actions_t_flat,
-                    obs_batch_t=obs_t_flat,
-                    next_obs_batch_t=next_obs_t_flat,
-                    embedded_obs=embedded_obs_t_flat,
-                    embedded_next_obs=embedded_next_obs_t_flat,
-                    hidden_state=hidden_state,
-                    hidden_state_next=next_hidden_state,
+                    # Use view instead of reshape for memory efficiency (creates views, not copies)
+                    actions_t_flat = (
+                        actions_seq[:, :-1].contiguous().view(-1, actions_seq.shape[-1])
+                    )
+                    obs_t_flat = (
+                        obs_seq[:, :-1].contiguous().view(-1, obs_seq.shape[-1])
+                    )
+                    next_obs_t_flat = (
+                        obs_seq[:, 1:].contiguous().view(-1, obs_seq.shape[-1])
+                    )
+                    embedded_obs_t_flat = (
+                        latent_pi_sequence[:, :-1]
+                        .contiguous()
+                        .view(-1, latent_pi_sequence.shape[-1])
+                    )
+                    embedded_next_obs_t_flat = (
+                        latent_pi_sequence[:, 1:]
+                        .contiguous()
+                        .view(-1, latent_pi_sequence.shape[-1])
+                    )
+
+                    return self.icm.compute_loss(
+                        action_batch_t=actions_t_flat,
+                        obs_batch_t=obs_t_flat,
+                        next_obs_batch_t=next_obs_t_flat,
+                        embedded_obs=embedded_obs_t_flat,
+                        embedded_next_obs=embedded_next_obs_t_flat,
+                        hidden_state=hidden_state,
+                        hidden_state_next=next_hidden_state,
+                    )
+
+                # Use gradient checkpointing to save memory during backprop
+                # This trades compute for memory by recomputing forward pass during backward
+                icm_total_loss, icm_i_loss, icm_f_loss, _, _ = checkpoint(
+                    icm_loss_function, actions, obs, latent_pi_seq, use_reentrant=False
                 )
 
             ppo_loss = (

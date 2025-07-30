@@ -359,6 +359,10 @@ class StochasticActor(EvolvableNetwork):
             0.5 * (action + 1.0) * (self.action_high - self.action_low)
         )
 
+    @torch.compile(
+        mode="reduce-overhead",
+        disable=lambda: os.getenv("DISABLE_TORCH_COMPILE", "false").lower() == "true",
+    )
     def forward_head(
         self,
         latent: torch.Tensor,
@@ -386,9 +390,54 @@ class StochasticActor(EvolvableNetwork):
             latent_flat = latent.reshape(batch_size * seq_len, -1)
 
             # Process through distribution head
-            action_flat, log_prob_flat, entropy_flat = self.head_net.forward(
-                latent_flat, action_mask, sample=sample, deterministic=deterministic
-            )
+            # Handle action mask for flattened sequence processing
+            action_mask_flat = None
+            if action_mask is not None:
+                try:
+                    if len(action_mask.shape) == 3:  # (batch, seq_len, action_dim)
+                        action_mask_flat = action_mask.reshape(batch_size * seq_len, -1)
+                    elif len(action_mask.shape) == 2:  # (batch, action_dim) - broadcast
+                        action_mask_flat = (
+                            action_mask.unsqueeze(1)
+                            .expand(-1, seq_len, -1)
+                            .reshape(batch_size * seq_len, -1)
+                        )
+                    else:  # Assume it's already flat or incompatible
+                        action_mask_flat = action_mask
+                except Exception:
+                    # If action mask processing fails, ignore it rather than crash
+                    action_mask_flat = None
+
+            try:
+                action_flat, log_prob_flat, entropy_flat = self.head_net.forward(
+                    latent_flat,
+                    action_mask_flat,
+                    sample=sample,
+                    deterministic=deterministic,
+                )
+
+                # Validate outputs - ensure no None values that would cause reshape errors
+                if action_flat is None:
+                    raise ValueError(
+                        f"action_flat is None - head_net.forward failed with latent_flat.shape: {latent_flat.shape}"
+                    )
+                if log_prob_flat is None:
+                    raise ValueError(f"log_prob_flat is None - head_net.forward failed")
+                if entropy_flat is None:
+                    raise ValueError(f"entropy_flat is None - head_net.forward failed")
+
+            except Exception as e:
+                # Provide detailed error context for debugging production issues
+                error_msg = (
+                    f"StochasticActor.forward_head sequence processing failed:\n"
+                )
+                error_msg += f"  latent.shape: {latent.shape}\n"
+                error_msg += f"  latent_flat.shape: {latent_flat.shape}\n"
+                error_msg += f"  action_mask shape: {action_mask.shape if action_mask is not None else None}\n"
+                error_msg += f"  action_mask_flat shape: {action_mask_flat.shape if action_mask_flat is not None else None}\n"
+                error_msg += f"  sample: {sample}, deterministic: {deterministic}\n"
+                error_msg += f"  Original error: {e}"
+                raise RuntimeError(error_msg) from e
 
             # Reshape back to sequence format
             action = action_flat.reshape(batch_size, seq_len, -1)

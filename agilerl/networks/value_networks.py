@@ -1,3 +1,4 @@
+import os
 from dataclasses import asdict
 from typing import Optional, Tuple, Type, Union
 
@@ -143,6 +144,31 @@ class ValueNetwork(EvolvableNetwork):
                 values = self.head_net(latent)
 
             return values
+
+    @torch.compile(
+        mode="reduce-overhead",
+        disable=lambda: os.getenv("DISABLE_TORCH_COMPILE", "false").lower() == "true",
+    )
+    def forward_head(self, latent: torch.Tensor) -> torch.Tensor:
+        """Forward pass through the head of the network only.
+
+        :param latent: Latent features from the encoder.
+        :type latent: torch.Tensor
+        :return: Value predictions.
+        :rtype: torch.Tensor
+        """
+        # Handle sequence inputs - latent may be (batch, seq_len, latent_dim)
+        if len(latent.shape) == 3:
+            batch_size, seq_len = latent.shape[0], latent.shape[1]
+            # Flatten for head processing
+            latent_flat = latent.reshape(batch_size * seq_len, -1)
+            values_flat = self.head_net(latent_flat)
+            # Reshape back to (batch, seq_len, 1)
+            values = values_flat.reshape(batch_size, seq_len, -1)
+        else:
+            values = self.head_net(latent)
+
+        return values
 
     def recreate_network(self) -> None:
         """Recreates the network."""
