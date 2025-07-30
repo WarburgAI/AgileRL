@@ -120,6 +120,31 @@ class ValueNetwork(EvolvableNetwork):
             latent = self.extract_features(x)
             return self.head_net(latent)
 
+    def sequence_forward(
+        self, obs_seq: TorchObsType, hidden_state: Optional[TorchObsType] = None
+    ) -> Tuple[torch.Tensor, Optional[TorchObsType]]:
+        """Forward pass for a sequence of observations."""
+        if not self.recurrent:
+            raise ValueError(
+                "sequence_forward is only supported for recurrent networks."
+            )
+
+        features_seq, next_hidden = self.extract_features(
+            obs_seq, hidden_state=hidden_state
+        )
+
+        is_dict = isinstance(obs_seq, dict)
+        if is_dict:
+            batch_size, seq_len = next(iter(obs_seq.values())).shape[:2]
+        else:
+            batch_size, seq_len = obs_seq.shape[:2]
+
+        features_flat = features_seq.reshape(batch_size * seq_len, -1)
+        values_flat = self.head_net(features_flat)
+        values = values_flat.reshape(batch_size, seq_len, -1)
+
+        return values, next_hidden
+
     def recreate_network(self) -> None:
         """Recreates the network."""
         self.recreate_encoder()

@@ -424,6 +424,55 @@ class StochasticActor(EvolvableNetwork):
         """
         return self.head_net.entropy()
 
+    def sequence_forward(
+        self,
+        obs_seq: TorchObsType,
+        hidden_state: Optional[ArrayOrTensor] = None,
+        action_mask: Optional[ArrayOrTensor] = None,
+        sample: bool = True,
+        deterministic: bool = False,
+    ) -> Tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[ArrayOrTensor]
+    ]:
+        """Forward pass for a sequence of observations."""
+        if not self.recurrent:
+            raise ValueError(
+                "sequence_forward is only supported for recurrent networks."
+            )
+
+        features_seq, next_hidden = self.extract_features(obs_seq, hidden_state)
+
+        is_dict = isinstance(obs_seq, dict)
+        if is_dict:
+            batch_size, seq_len = next(iter(obs_seq.values())).shape[:2]
+        else:
+            batch_size, seq_len = obs_seq.shape[:2]
+
+        features_flat = features_seq.reshape(batch_size * seq_len, -1)
+
+        # Pass flattened features to the distribution head
+        actions_flat, log_probs_flat, entropies_flat = self.forward_head(
+            features_flat,
+            action_mask=action_mask,
+            sample=sample,
+            deterministic=deterministic,
+        )
+
+        # Reshape outputs to sequence format
+        action_shape = self.action_space.shape
+        if not action_shape:  # Discrete
+            actions = actions_flat.reshape(batch_size, seq_len)
+        else:
+            actions = actions_flat.reshape(batch_size, seq_len, *action_shape)
+
+        log_probs = log_probs_flat.reshape(batch_size, seq_len)
+        entropies = entropies_flat.reshape(batch_size, seq_len)
+
+        if self.squash_output:
+            actions = self.scale_action(actions)
+
+        return actions, log_probs, entropies, features_seq, next_hidden
+
     def recreate_network(self) -> None:
         """Recreates the network with the same parameters as the current network."""
         self.recreate_encoder()

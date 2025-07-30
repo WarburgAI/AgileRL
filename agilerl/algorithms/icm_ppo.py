@@ -688,6 +688,17 @@ class ICM_PPO(RLAlgorithm):
         :return: Action, log probability, entropy, state values, and next hidden state
         :rtype: Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[ArrayOrTensor], Optional[ArrayOrTensor]]
         """
+        is_sequence = len(obs.shape) > 2
+
+        if self.recurrent and is_sequence:
+            return self.actor.sequence_forward(
+                obs,
+                hidden_state,
+                action_mask=action_mask,
+                sample=sample,
+                deterministic=deterministic,
+            )
+
         if not self.use_shared_encoder_for_icm:
             return self._get_action_and_values_icm(
                 obs,
@@ -1387,148 +1398,79 @@ class ICM_PPO(RLAlgorithm):
             if seq_len is None:
                 seq_len = self.max_seq_len
 
-            # Common BPTT processing logic for the current minibatch
-            policy_loss_total = 0.0
-            value_loss_total = 0.0
-            entropy_loss_total = 0.0
-            icm_total_loss = 0.0
-            icm_i_loss = 0.0
-            icm_f_loss = 0.0
-            approx_kl = 0.0
-            clip_fraction = 0.0
+            (
+                new_actions,
+                new_log_probs,
+                entropy,
+                new_values,
+                _,
+            ) = self._get_sequence_actions_and_values(obs, hidden_state=hidden_state)
 
+            log_ratio = new_log_probs - old_log_probs
+            ratio = torch.exp(log_ratio)
+            policy_loss1 = -advantages * ratio
+            policy_loss2 = -advantages * torch.clamp(
+                ratio, 1 - self.clip_coef, 1 + self.clip_coef
+            )
+            policy_loss = torch.max(policy_loss1, policy_loss2).mean()
+
+            if old_values is not None:
+                v_loss_unclipped = (new_values.squeeze() - returns) ** 2
+                v_clipped = old_values + torch.clamp(
+                    new_values.squeeze() - old_values, -self.clip_coef, self.clip_coef
+                )
+                v_loss_clipped = (v_clipped - returns) ** 2
+                value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+            else:
+                value_loss = 0.5 * ((new_values.squeeze() - returns) ** 2).mean()
+
+            entropy_loss = -entropy.mean()
+            loss = (
+                policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss
+            )
+
+            with torch.no_grad():
+                approx_kl = ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
+                clip_fraction = (
+                    torch.mean((torch.abs(ratio - 1.0) > self.clip_coef).float())
+                ).item()
+
+            icm_total_loss, icm_i_loss, icm_f_loss = (
+                torch.tensor(0.0),
+                torch.tensor(0.0),
+                torch.tensor(0.0),
+            )
             if self.use_shared_encoder_for_icm:
-                latent_pi = latent_pi[:, 0] if latent_pi is not None else None
+                if latent_pi is None:
+                    raise ValueError(
+                        "latent_pi must be provided for ICM loss calculation when using shared encoder."
+                    )
 
-            for t in range(seq_len):
-                if isinstance(obs, dict):
-                    obs_t = {k_obs: v_obs[:, t] for k_obs, v_obs in obs.items()}
-                else:
-                    obs_t = obs[:, t]
+                flat_actions = actions.reshape(-1, actions.shape[-1])
+                flat_obs = obs.reshape(-1, obs.shape[-1])
+                flat_latent_pi = latent_pi.reshape(-1, latent_pi.shape[-1])
 
-                actions_t = actions[:, t]
-                old_log_prob_t = old_log_probs[:, t]
-                adv_t = advantages[:, t]
-                return_t = returns[:, t]
-
-                returned_tuple = self._get_action_and_values(
-                    obs_t,
-                    hidden_state=hidden_state,  # Pass dict (layers, batch, size)
-                    sample=False,
+                icm_total_loss, icm_i_loss, icm_f_loss, _, _ = self.icm.compute_loss(
+                    action_batch_t=flat_actions,
+                    obs_batch_t=flat_obs,
+                    next_obs_batch_t=flat_obs,
+                    embedded_obs=flat_latent_pi,
+                    embedded_next_obs=flat_latent_pi,
+                    hidden_state=None,
+                    hidden_state_next=None,
                 )
-
-                if self.use_shared_encoder_for_icm:
-                    (
-                        _,
-                        _,
-                        entropy_t,
-                        new_value_t,
-                        next_hidden_state_for_step,
-                        next_latent_pi,
-                    ) = returned_tuple
-                else:
-                    _, _, entropy_t, new_value_t, next_hidden_state_for_step = (
-                        returned_tuple
-                    )
-
-                new_log_prob_t = self.actor.action_log_prob(actions_t)
-                if entropy_t is None:
-                    entropy_t = (
-                        -new_log_prob_t.mean()
-                    )  # Ensure entropy_t is scalar if new_log_prob_t is not
-                else:
-                    entropy_t = entropy_t.mean()  # Ensure scalar
-
-                ratio = torch.exp(new_log_prob_t - old_log_prob_t)
-                policy_loss1 = -adv_t * ratio
-                policy_loss2 = -adv_t * torch.clamp(
-                    ratio, 1 - self.clip_coef, 1 + self.clip_coef
-                )
-                policy_loss = torch.max(policy_loss1, policy_loss2).mean()
-
-                # Implement value clipping
-                if old_values is not None:
-                    old_value_t = old_values[:, t]
-                    v_loss_unclipped = (new_value_t - return_t) ** 2
-                    v_clipped = old_value_t + torch.clamp(
-                        new_value_t - old_value_t, -self.clip_coef, self.clip_coef
-                    )
-                    v_loss_clipped = (v_clipped - return_t) ** 2
-                    value_loss = (
-                        0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
-                    )
-                else:
-                    value_loss = 0.5 * ((new_value_t - return_t) ** 2).mean()
-
-                entropy_step_loss = -entropy_t  # entropy_t is already mean
-
-                policy_loss_total += policy_loss
-                value_loss_total += value_loss
-                entropy_loss_total += entropy_step_loss
-
-                if self.use_shared_encoder_for_icm:
-                    icm_total_loss_step, icm_i_loss_step, icm_f_loss_step, _, _ = (
-                        self.icm.compute_loss(
-                            action_batch_t=actions_t,
-                            obs_batch_t=obs_t,
-                            next_obs_batch_t=obs_t,
-                            embedded_obs=latent_pi,
-                            embedded_next_obs=next_latent_pi,
-                            hidden_state=hidden_state,
-                            hidden_state_next=hidden_state,
-                        )
-                    )
-                    icm_total_loss += icm_total_loss_step
-                    icm_i_loss += icm_i_loss_step
-                    icm_f_loss += icm_f_loss_step
-
-                with torch.no_grad():
-                    log_ratio = new_log_prob_t - old_log_prob_t
-                    approx_kl += ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
-                    clip_fraction += torch.mean(
-                        (torch.abs(ratio - 1.0) > self.clip_coef).float()
-                    ).item()
-
-                if self.recurrent and next_hidden_state_for_step is not None:
-                    hidden_state = (
-                        next_hidden_state_for_step  # Already (layers, batch, size)
-                    )
-                    if self.use_shared_encoder_for_icm:
-                        latent_pi = next_latent_pi
-
-            # Average losses over sequence length
-            policy_loss_avg_over_seq = policy_loss_total / seq_len
-            value_loss_avg_over_seq = value_loss_total / seq_len
-            entropy_loss_avg_over_seq = entropy_loss_total / seq_len
-            icm_total_loss_avg_over_seq = icm_total_loss / seq_len
-            icm_i_loss_avg_over_seq = icm_i_loss / seq_len
-            icm_f_loss_avg_over_seq = icm_f_loss / seq_len
-            approx_kl /= seq_len
-            clip_fraction /= seq_len
-
-            loss = (
-                policy_loss_avg_over_seq
-                + self.vf_coef * value_loss_avg_over_seq
-                + self.ent_coef * entropy_loss_avg_over_seq
-            )
-
-            loss = (
-                self.icm_loss_weight * icm_total_loss_avg_over_seq
-                + (1 - self.icm_loss_weight) * loss
-                if self.use_shared_encoder_for_icm
-                else loss
-            )
+                loss += self.icm_loss_weight * icm_total_loss
 
             return {
                 "loss": loss,
-                "policy_loss": policy_loss_avg_over_seq,
-                "value_loss": value_loss_avg_over_seq,
-                "entropy_loss": entropy_loss_avg_over_seq,
+                "policy_loss": policy_loss,
+                "value_loss": value_loss,
+                "entropy_loss": entropy_loss,
                 "approx_kl": approx_kl,
                 "clip_fraction": clip_fraction,
-                "icm_total_loss": icm_total_loss_avg_over_seq,
-                "icm_i_loss": icm_i_loss_avg_over_seq,
-                "icm_f_loss": icm_f_loss_avg_over_seq,
+                "icm_total_loss": icm_total_loss,
+                "icm_i_loss": icm_i_loss,
+                "icm_f_loss": icm_f_loss,
             }
         else:
             # Get values and next hidden state (which we ignore in flat learning)
@@ -1553,14 +1495,14 @@ class ICM_PPO(RLAlgorithm):
             policy_loss = torch.max(policy_loss1, policy_loss2).mean()
 
             if old_values is not None:
-                v_loss_unclipped = (new_value_t - returns) ** 2
+                v_loss_unclipped = (new_value_t.squeeze() - returns) ** 2
                 v_clipped = old_values + torch.clamp(
-                    new_value_t - old_values, -self.clip_coef, self.clip_coef
+                    new_value_t.squeeze() - old_values, -self.clip_coef, self.clip_coef
                 )
                 v_loss_clipped = (v_clipped - returns) ** 2
                 value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
             else:
-                value_loss = 0.5 * ((new_value_t - returns) ** 2).mean()
+                value_loss = 0.5 * ((new_value_t.squeeze() - returns) ** 2).mean()
             entropy_loss = -entropy_t.mean()
 
             loss = (
@@ -1570,8 +1512,8 @@ class ICM_PPO(RLAlgorithm):
             with torch.no_grad():
                 log_ratio = new_log_prob_t - old_log_probs
                 approx_kl = ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
-                clip_fraction = torch.mean(
-                    (torch.abs(ratio - 1.0) > self.clip_coef).float()
+                clip_fraction = (
+                    torch.mean((torch.abs(ratio - 1.0) > self.clip_coef).float())
                 ).item()
 
             if self.use_shared_encoder_for_icm:
@@ -2120,3 +2062,27 @@ class ICM_PPO(RLAlgorithm):
 
         mean_loss /= num_samples * self.update_epochs
         return mean_loss
+
+    def _get_sequence_actions_and_values(
+        self,
+        obs: ArrayOrTensor,
+        action_mask: Optional[ArrayOrTensor] = None,
+        hidden_state: Optional[ArrayOrTensor] = None,
+    ) -> Tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[ArrayOrTensor]
+    ]:
+        """Forward pass for a sequence of observations to get actions and values."""
+        (
+            actions,
+            log_probs,
+            entropies,
+            features_seq,
+            next_hidden,
+        ) = self.actor.sequence_forward(obs, hidden_state, action_mask=action_mask)
+
+        if self.share_encoders:
+            values = self.critic.head_net(features_seq)
+        else:
+            values, _ = self.critic.sequence_forward(obs, hidden_state)
+
+        return actions, log_probs, entropies, values, next_hidden
