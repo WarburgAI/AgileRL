@@ -951,7 +951,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         # Load other attributes
         checkpoint.pop("network_info")
         for attribute in checkpoint.keys():
-            if attribute in ignore_attributes:
+            if attribute in ignore_attributes or attribute == "device":
                 continue
             setattr(self, attribute, checkpoint[attribute])
 
