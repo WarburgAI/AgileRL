@@ -228,6 +228,10 @@ class ICMFeatureEncoder(EvolvableModule):
                     obs.dim() == 4 and obs.size(3) == self.input_shape[0]
                 ):  # B,H,W,C -> B,C,H,W
                     obs = obs.permute(0, 3, 1, 2)
+                elif (
+                    obs.dim() == 3 and obs.size(2) == self.input_shape[0]
+                ):  # B,H,W,C -> B,C,H,W (when C=1,3,4)
+                    obs = obs.permute(0, 2, 0, 1)
 
         features = self.base_encoder(obs)
         next_hidden_state = None
@@ -406,9 +410,9 @@ def actions_to_one_hot(actions, action_space):
         return torch.cat(one_hots, dim=1)
     elif isinstance(action_space, spaces.Box):
         # For continuous actions, just return the actions as float tensors
-        # Optionally normalize to [0, 1] range if action space has bounds
+        # Optionally normalize to [0, 1] range
         actions_float = actions.float()
-        if action_space.is_bounded():
+        if hasattr(action_space, "is_bounded") and action_space.is_bounded():
             # Normalize to [0, 1] range
             low = torch.tensor(
                 action_space.low, device=actions.device, dtype=torch.float32
@@ -417,6 +421,16 @@ def actions_to_one_hot(actions, action_space):
                 action_space.high, device=actions.device, dtype=torch.float32
             )
             actions_float = (actions_float - low) / (high - low)
+        elif hasattr(action_space, "low") and hasattr(action_space, "high"):
+            # Handle cases where bounds exist but is_bounded() is not available
+            low = torch.tensor(
+                action_space.low, device=actions.device, dtype=torch.float32
+            )
+            high = torch.tensor(
+                action_space.high, device=actions.device, dtype=torch.float32
+            )
+            if not torch.isinf(low).any() and not torch.isinf(high).any():
+                actions_float = (actions_float - low) / (high - low)
         return actions_float
     else:
         raise ValueError(f"Unsupported action space type: {type(action_space)}")
@@ -525,13 +539,19 @@ class ICM(EvolvableModule):
 
         self.optimizer = None
         if params_to_optimize:
-            # self.optimizer = optim.Adam(params_to_optimize, lr=self.lr)
+            # Collect actual parameters from modules
+            all_params = []
+            for module in params_to_optimize:
+                all_params.extend(list(module.parameters()))
+            # self.optimizer = optim.Adam(all_params, lr=self.lr)
             self.params_to_optimize = params_to_optimize
+            self._collected_params = all_params
         else:
             # This can happen if use_internal_encoder is False and somehow inverse/forward models have no params.
             print(
                 "Warning: ICM has no parameters to optimize. Ensure this is intended."
             )
+            self._collected_params = []
 
         self.mse_loss_fn = nn.MSELoss(reduction="none")
         self.ce_loss_fn = nn.CrossEntropyLoss()
@@ -645,8 +665,8 @@ class ICM(EvolvableModule):
         intrinsic_reward = 0.5 * mse_per_feature.sum(dim=1)
         intrinsic_reward *= self.intrinsic_reward_weight
 
-        returned_hidden_obs = hidden_state if not self.is_recurrent else None
-        returned_hidden_next_obs = next_hidden_state if not self.is_recurrent else None
+        returned_hidden_obs = hidden_state if self.is_recurrent else None
+        returned_hidden_next_obs = next_hidden_state if self.is_recurrent else None
         return intrinsic_reward, returned_hidden_obs, returned_hidden_next_obs
 
     def update(
@@ -771,7 +791,9 @@ class ICM(EvolvableModule):
             # For discrete actions, use cross-entropy loss
             targets = action_input
             if isinstance(self.action_space, spaces.Discrete):
-                loss_I = self.ce_loss_fn(pred_action_output, targets)
+                # Convert one-hot targets back to class indices for CrossEntropyLoss
+                targets_indices = torch.argmax(targets, dim=1)
+                loss_I = self.ce_loss_fn(pred_action_output, targets_indices)
             elif isinstance(self.action_space, spaces.MultiDiscrete):
                 # For MultiDiscrete, compute loss for each action dimension
                 losses_I = []
@@ -779,7 +801,8 @@ class ICM(EvolvableModule):
                 for i, action_size in enumerate(self.inverse_model.action_sizes):
                     end_idx = start_idx + action_size
                     logits_i = pred_action_output[:, start_idx:end_idx]
-                    targets_i = targets[:, start_idx:end_idx]
+                    # Convert one-hot targets back to class indices for CrossEntropyLoss
+                    targets_i = torch.argmax(targets[:, start_idx:end_idx], dim=1)
                     loss_i = self.ce_loss_fn(logits_i, targets_i)
                     losses_I.append(loss_i)
                     start_idx = end_idx

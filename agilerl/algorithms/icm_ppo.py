@@ -644,24 +644,38 @@ class ICM_PPO(RLAlgorithm):
         """Extend the add method to add the encoder_out field to the rollout buffer."""
         if isinstance(self.rollout_buffer, RolloutBuffer):
             self.rollout_buffer.add(*args, **kwargs)
-            pos = self.rollout_buffer.pos - 1
-            if self.use_shared_encoder_for_icm:
+            pos = (self.rollout_buffer.pos - 1) % self.rollout_buffer.capacity
+            if self.use_shared_encoder_for_icm and encoder_out is not None:
                 self.rollout_buffer.buffer["encoder_out"][pos] = torch.as_tensor(
                     encoder_out, dtype=torch.float32, device="cpu"
                 )
-                # decrement pos by 1 to get the position before the call to super().add() incremented it
                 return
 
-            if self.recurrent:
-                self.rollout_buffer.buffer["hidden_state"][pos] = torch.as_tensor(
-                    icm_hidden_state, dtype=torch.float32, device="cpu"
-                )
-                if icm_next_hidden_state is not None:
-                    self.rollout_buffer.buffer["next_hidden_state"][pos] = (
-                        torch.as_tensor(
-                            icm_next_hidden_state, dtype=torch.float32, device="cpu"
-                        )
-                    )
+            if self.recurrent and icm_hidden_state is not None:
+                # Store ICM hidden states separately from PPO hidden states
+                if "icm_hidden_states" in self.rollout_buffer.buffer:
+                    for key, val in icm_hidden_state.items():
+                        if key in self.rollout_buffer.buffer["icm_hidden_states"]:
+                            self.rollout_buffer.buffer["icm_hidden_states"][key][
+                                pos
+                            ] = (
+                                val.permute(1, 0, 2).cpu()
+                                if val.dim() == 3
+                                else val.cpu()
+                            )
+                if (
+                    icm_next_hidden_state is not None
+                    and "icm_next_hidden_states" in self.rollout_buffer.buffer
+                ):
+                    for key, val in icm_next_hidden_state.items():
+                        if key in self.rollout_buffer.buffer["icm_next_hidden_states"]:
+                            self.rollout_buffer.buffer["icm_next_hidden_states"][key][
+                                pos
+                            ] = (
+                                val.permute(1, 0, 2).cpu()
+                                if val.dim() == 3
+                                else val.cpu()
+                            )
 
         if (
             self.recurrent
