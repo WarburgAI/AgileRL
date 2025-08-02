@@ -653,6 +653,11 @@ class ICM(EvolvableModule):
             hidden_state_next_obs,
         )
 
+        phi_obs = phi_obs / (phi_obs.norm(p=2, dim=-1, keepdim=True) + 1e-8)
+        phi_next_obs = phi_next_obs / (
+            phi_next_obs.norm(p=2, dim=-1, keepdim=True) + 1e-8
+        )
+
         # Use appropriate dtype based on action space type
         dtype = torch.float32 if self.is_continuous_action else torch.long
         action_batch_t = self._to_tensor(action_batch, dtype=dtype)
@@ -694,12 +699,12 @@ class ICM(EvolvableModule):
 
         total_loss, loss_I, loss_F, returned_hidden_obs, returned_hidden_next_obs = (
             self.compute_loss(
-                obs_batch_t,
-                action_batch_t,
-                next_obs_batch_t,
-                hidden_state_obs,
-                hidden_state_next_obs,
-                action_input,
+                obs_batch_t=obs_batch_t,
+                action_batch_t=action_batch_t,
+                next_obs_batch_t=next_obs_batch_t,
+                hidden_state_obs=hidden_state_obs,
+                hidden_state_next_obs=hidden_state_next_obs,
+                action_input=action_input,
             )
         )
 
@@ -770,6 +775,11 @@ class ICM(EvolvableModule):
             embedded_next_obs,
             hidden_state,
             hidden_state_next,
+        )
+
+        phi_obs = phi_obs / (phi_obs.norm(p=2, dim=-1, keepdim=True) + 1e-8)
+        phi_next_obs = phi_next_obs / (
+            phi_next_obs.norm(p=2, dim=-1, keepdim=True) + 1e-8
         )
 
         # === Inverse Model Loss (L_I) ===

@@ -1626,8 +1626,7 @@ class ICM_PPO(RLAlgorithm):
 
             if self.use_shared_encoder_for_icm and next_obs is not None:
                 # Extract features for next observations
-                with torch.no_grad():
-                    latent_pi_next = self.actor.extract_features(next_obs)
+                latent_pi_next = self.actor.extract_features(next_obs)
 
                 # Compute ICM loss with proper current and next observations/embeddings
                 icm_total_loss, icm_i_loss, icm_f_loss, _, _ = self.icm.compute_loss(
