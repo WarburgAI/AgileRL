@@ -148,22 +148,22 @@ class ICMHook(RolloutHook):
             step_data["last_obs_for_icm"] = obs
 
         # Calculate intrinsic reward with timing
-        with agent._timing_tracker.time_context("intrinsic_reward_calculation"):
+        with agent.timing_tracker.time_context("intrinsic_reward_calculation"):
             intrinsic_reward, _, _ = agent.get_intrinsic_reward(
-                action,
-                step_data.get("last_obs_for_icm"),
-                obs,
-                step_data.get("encoder_last_output"),
-                encoder_output,
-                step_data.get("current_hidden_state_for_buffer"),
-                agent.hidden_state if hasattr(agent, "hidden_state") else None,
+                action_batch=action,
+                obs_batch=step_data.get("last_obs_for_icm"),
+                next_obs_batch=next_obs,
+                embedded_obs=step_data.get("encoder_last_output"),
+                embedded_next_obs=encoder_output,
+                hidden_state_obs=step_data.get("current_hidden_state_for_buffer"),
+                hidden_state_next_obs=(
+                    agent.hidden_state if hasattr(agent, "hidden_state") else None
+                ),
             )
 
         # Combine extrinsic and intrinsic rewards
-        intrinsic_reward_weight = getattr(agent, "intrinsic_reward_weight", 0.0)
-        combined_reward = (
-            1 - intrinsic_reward_weight
-        ) * reward + intrinsic_reward.detach().cpu().numpy()
+        # ICM already applies intrinsic_reward_weight internally; just add it.
+        combined_reward = reward + intrinsic_reward.detach().cpu().numpy()
 
         return combined_reward
 
@@ -361,8 +361,8 @@ def _collect_rollouts(
         )
 
     # Initialize timing tracker if not present
-    if not hasattr(agent, "_timing_tracker"):
-        agent._timing_tracker = TimingTracker()
+    if not hasattr(agent, "timing_tracker"):
+        agent.timing_tracker = TimingTracker()
 
     # Get appropriate hooks for this agent
     hooks = get_rollout_hooks(agent)
@@ -371,7 +371,7 @@ def _collect_rollouts(
     n_steps = n_steps or agent.learn_step
 
     # Use timing tracker context manager
-    with agent._timing_tracker.time_context("rollout_collection"):
+    with agent.timing_tracker.time_context("rollout_collection"):
         if reset_on_collect or (
             last_obs is None
             or last_done is None
@@ -568,10 +568,10 @@ def _collect_rollouts(
         )
 
     # Update timing metrics using the timing tracker
-    agent.last_collection_time = agent._timing_tracker.get_average_time(
+    agent.last_collection_time = agent.timing_tracker.get_average_time(
         "rollout_collection"
     )
-    agent.total_collection_time = agent._timing_tracker.get_time("rollout_collection")
+    agent.total_collection_time = agent.timing_tracker.get_time("rollout_collection")
 
     return completed_episode_scores, obs, done, scores, info
 

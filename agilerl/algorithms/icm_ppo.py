@@ -34,52 +34,6 @@ from agilerl.utils.algo_utils import (
 )
 
 
-# BIG TODO: currently, when not using shared encoder & the ICM is recurrent,
-# the ICM's Encoder hidden state is not stored in the rollout buffer, and
-# the current logic does not work for this case. Update this to store the
-# encoder hidden state in the rollout buffer, and to use this hidden state
-# for the ICM in the learn() methods.
-class ICMRolloutBuffer(RolloutBuffer):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.encoder_out = np.zeros((self.capacity, self.num_envs), dtype=np.float32)
-
-    def add(
-        self,
-        *,  # force keyword arguments
-        obs: ArrayOrTensor,
-        action: ArrayOrTensor,
-        reward: ArrayOrTensor,
-        done: ArrayOrTensor,
-        value: ArrayOrTensor,
-        log_prob: ArrayOrTensor,
-        encoder_out: ArrayOrTensor,  # New argument for ICM
-        next_obs: Optional[ArrayOrTensor] = None,
-        hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
-        next_hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
-    ) -> None:
-        """Add experience, including the ICM 'encoder_out' term, to the buffer."""
-        # Call original add method first
-        super().add(
-            obs=obs,
-            action=action,
-            reward=reward,
-            done=done,
-            value=value,
-            log_prob=log_prob,
-            next_obs=next_obs,
-            hidden_state=hidden_state,
-            next_hidden_state=next_hidden_state,
-        )
-        # Store the encoder_output term (adjust index logic if super().add changes self.pos)
-        if self.encoder_out is not None:
-            pos_to_add = (
-                self.pos - 1
-            ) % self.capacity  # Position where last data was added
-            encoder_out = np.asarray(encoder_out)
-            self.encoder_out[pos_to_add] = encoder_out
-
-
 class ICM_PPO(RLAlgorithm):
     """ICM-Augmented PPO algorithm.
 
@@ -1096,12 +1050,6 @@ class ICM_PPO(RLAlgorithm):
 
                 loss = loss_dict["loss"]
 
-                if self.use_shared_encoder_for_icm:
-                    loss = (
-                        self.icm_loss_weight * loss_dict["icm_total_loss"]
-                        + (1 - self.icm_loss_weight) * loss
-                    )
-
                 with self.timing_tracker.time_context("backward_pass_time"):
                     self.optimizer.zero_grad()
                     loss.backward()  # Gradients accumulate over the sequence within this backward call
@@ -1378,12 +1326,6 @@ class ICM_PPO(RLAlgorithm):
                         old_values=mb_old_values_seq,
                     )
                 loss = loss_dict["loss"]
-
-                if self.use_shared_encoder_for_icm:
-                    loss = (
-                        self.icm_loss_weight * loss_dict["icm_total_loss"]
-                        + (1 - self.icm_loss_weight) * loss
-                    )
 
                 with self.timing_tracker.time_context("bptt_backward_pass_time"):
                     self.optimizer.zero_grad()
