@@ -443,17 +443,17 @@ class EvolvableDistribution(EvolvableWrapper):
         return TorchDistribution(dist, self.squash_output)
 
     def log_prob(self, action: torch.Tensor) -> torch.Tensor:
-        """Get the log probability of the action.
+        if not self.squash_output:
+            return self._handler.log_prob(self.distribution, action)
 
-        :param action: Action.
-        :type action: torch.Tensor
-        :return: Log probability of the action.
-        :rtype: torch.Tensor
-        """
-        if self.dist is None:
-            raise ValueError("Distribution not initialized. Call forward first.")
+        # !IMPORTANT: Should we use the dist here ?
+        # Squashed (Box): a = tanh(u)  => u = atanh(a)
+        a = torch.clamp(action, -0.999999, 0.999999)
+        pre_squash = 0.5 * (torch.log1p(a) - torch.log1p(-a))  # atanh(a)
+        logp = self._handler.log_prob(self.distribution, pre_squash)
+        logp -= torch.log(1 - a.pow(2) + 1e-6).sum(dim=1)  # Jacobian term
 
-        return self.dist.log_prob(action)
+        return logp
 
     def entropy(self) -> torch.Tensor:
         """Get the entropy of the action distribution.
@@ -507,6 +507,20 @@ class EvolvableDistribution(EvolvableWrapper):
             )
 
         return masked_logits
+
+    def build_dist_from_latent(self, latent, action_mask=None):
+        logits = self.wrapped(latent)
+        if action_mask is not None:
+            logits = self.apply_mask(logits, action_mask)
+        return self.get_distribution(logits)
+
+    def log_prob_from_latent(self, latent, actions, action_mask=None):
+        dist = self.build_dist_from_latent(latent, action_mask)
+        return dist.log_prob(actions)
+
+    def entropy_from_latent(self, latent, action_mask=None):
+        dist = self.build_dist_from_latent(latent, action_mask)
+        return dist.entropy()
 
     def forward(
         self,

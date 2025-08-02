@@ -755,23 +755,15 @@ class ICM_PPO(RLAlgorithm):
         :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
         obs = self.preprocess_observation(obs)
+        # Get dist/logits for these obs
+        _, _, entropy, values, _, _ = self._get_action_and_values(
+            obs, hidden_state=hidden_state, sample=False, deterministic=False
+        )
+        # Compute log prob of the provided actions under the CURRENT dist
+        log_probs = self.actor.action_log_prob(actions)
 
-        # Get action probabilities and values
-        if self.recurrent:
-            action_probs, values, _ = self._get_action_and_values(
-                obs, hidden_state=hidden_state
-            )
-        else:
-            action_probs, values, _ = self._get_action_and_values(obs)
-
-        # Get log probabilities and entropy
-        log_probs = self.actor.get_log_prob(action_probs, actions)
-        entropy = self.actor.get_entropy(action_probs)
-
-        # Use -log_prob as entropy when squashing output in continuous action spaces
         if entropy is None:
             entropy = -log_probs.mean()
-
         return log_probs, entropy, values, hidden_state
 
     def get_action(
@@ -1580,7 +1572,9 @@ class ICM_PPO(RLAlgorithm):
             )
 
             # Compute log prob of taken actions
-            new_log_prob_t = self.actor.action_log_prob(actions)
+            new_log_prob_t = self.actor.head_net.log_prob_from_latent(
+                latent_pi, actions, action_mask=None
+            )
 
             # Use -log_prob as entropy when head returns None (continuous actions w/ squashing)
             if entropy_t is None:
@@ -1639,12 +1633,7 @@ class ICM_PPO(RLAlgorithm):
                     hidden_state_next=hidden_state,  # TODO: Handle hidden states properly
                 )
 
-            loss = (
-                self.icm_loss_weight * icm_total_loss
-                + (1 - self.icm_loss_weight) * loss
-                if self.use_shared_encoder_for_icm
-                else loss
-            )
+            loss += self.icm_loss_weight * icm_total_loss
 
             return {
                 "loss": loss,
