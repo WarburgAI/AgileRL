@@ -106,13 +106,13 @@ def run_demo():
 
     # --- Create Environment and Population ---
     n_symbols = 5
-    delay_steps = 6
-    num_envs = 128  # Can be higher for faster training
+    delay_steps = 20
+    num_envs = 512  # Can be higher for faster training
 
     if recurrent:
         NET_CONFIG = {
             "encoder_config": {
-                "hidden_state_size": 64,  # LSTM hidden state size
+                "hidden_state_size": 32,  # LSTM hidden state size
                 "max_seq_len": delay_steps + 2,  # Match episode length
             },
         }
@@ -126,21 +126,23 @@ def run_demo():
     # Hyperparameters
     INIT_HP = {
         "POP_SIZE": 2,  # Population size
-        "BATCH_SIZE": 512,
-        "LEARN_STEP": (delay_steps + 2),  # Match episode length (delay_steps + 2)
-        "LR": 1e-4,
+        "BATCH_SIZE": 256,
+        "LEARN_STEP": delay_steps + 2,  # Steps per episode
+        "HIDDEN_STATE_SIZE": 32,
+        "LR": 1e-3,
         "GAMMA": 0.99,
-        "GAE_LAMBDA": 1.0,
+        "GAE_LAMBDA": 0.95,
         "CLIP_COEF": 0.2,
         "ENT_COEF": 0.001,
         "VF_COEF": 1.0,
         "MAX_GRAD_NORM": 0.5,
-        "UPDATE_EPOCHS": 2,
+        "UPDATE_EPOCHS": 4,
         "SHARE_ENCODERS": True,
-        "RECURRENT": recurrent,
-        "USE_ROLLOUT_BUFFER": True,
         "ACTION_STD_INIT": 0.6,
         "TARGET_KL": None,
+        "CHANNELS_LAST": False,
+        "RECURRENT": recurrent,
+        "USE_ROLLOUT_BUFFER": True,
     }
 
     def make_env():
