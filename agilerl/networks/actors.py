@@ -459,17 +459,18 @@ class StochasticActor(EvolvableNetwork):
         )
 
         # Reshape outputs to sequence format
-        action_shape = self.action_space.shape
-        if not action_shape:  # Discrete
-            actions = actions_flat.reshape(batch_size, seq_len)
-        else:
-            actions = actions_flat.reshape(batch_size, seq_len, *action_shape)
+        if sample:
+            action_shape = self.action_space.shape
+            if not action_shape:  # Discrete
+                actions = actions_flat.reshape(batch_size, seq_len)
+            else:
+                actions = actions_flat.reshape(batch_size, seq_len, *action_shape)
+
+            if self.squash_output and sample:
+                actions = self.scale_action(actions)
 
         log_probs = log_probs_flat.reshape(batch_size, seq_len)
         entropies = entropies_flat.reshape(batch_size, seq_len)
-
-        if self.squash_output:
-            actions = self.scale_action(actions)
 
         return actions, log_probs, entropies, features_seq, next_hidden
 

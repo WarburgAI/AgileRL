@@ -741,6 +741,7 @@ class ICM_PPO(RLAlgorithm):
         obs: ArrayOrTensor,
         actions: ArrayOrTensor,
         hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
+        action_mask: Optional[ArrayOrTensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Evaluate actions for given observations and return log probabilities, entropy, and values.
 
@@ -755,15 +756,33 @@ class ICM_PPO(RLAlgorithm):
         :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
         obs = self.preprocess_observation(obs)
-        # Get dist/logits for these obs
-        _, _, entropy, values, _, _ = self._get_action_and_values(
-            obs, hidden_state=hidden_state, sample=False, deterministic=False
-        )
-        # Compute log prob of the provided actions under the CURRENT dist
-        log_probs = self.actor.action_log_prob(actions)
 
+        # Build features (and next hidden if recurrent)
+        if self.recurrent and hidden_state is not None:
+            latent, _ = self.actor.extract_features(obs, hidden_state=hidden_state)
+        else:
+            latent = self.actor.extract_features(obs)
+
+        # Values
+        if self.share_encoders:
+            values = self.critic.forward_head(latent).squeeze(-1)
+        else:
+            if self.recurrent and hidden_state is not None:
+                values, _ = self.critic(obs, hidden_state=hidden_state)
+                values = values.squeeze(-1)
+            else:
+                values = self.critic(obs).squeeze(-1)
+
+        # Log-prob/entropy of the PROVIDED actions under CURRENT policy
+        log_probs = self.actor.head_net.log_prob_from_latent(
+            latent, actions, action_mask=action_mask
+        )
+        entropy = self.actor.head_net.entropy_from_latent(
+            latent, action_mask=action_mask
+        )
         if entropy is None:
-            entropy = -log_probs.mean()
+            entropy = -log_probs  # fallback for squashed Box
+
         return log_probs, entropy, values, hidden_state
 
     def get_action(
@@ -1443,29 +1462,43 @@ class ICM_PPO(RLAlgorithm):
         old_values=None,
         **kwargs,
     ) -> Dict[str, Any]:
-        """Compute the loss for the actor, critic, and ICM networks.
-
-        :param obs: The observation at time t
-        :type obs: ArrayOrTensor
-        :param actions: The action taken at time t
-        :type actions: ArrayOrTensor
-        """
+        """Compute the loss for the actor, critic, and ICM networks."""
         learn_by_bptt = kwargs.get("learn_by_bptt", False)
         seq_len = kwargs.get("seq_len", None)
+        action_mask = kwargs.get("action_mask", None)  # optional
 
         if learn_by_bptt:
             if seq_len is None:
                 seq_len = self.max_seq_len
 
-            (
-                new_actions,
-                new_log_probs,
-                entropy,
-                new_values,
-                _,
-            ) = self._get_sequence_actions_and_values(obs, hidden_state=hidden_state)
+            # ---- Features / values for the whole sequence (do NOT resample actions) ----
+            # (we ignore returned sampled actions/log_probs)
+            _, _, entropies, features_seq, _ = self.actor.sequence_forward(
+                obs, hidden_state, action_mask=None
+            )
+            # Values from critic
+            if self.share_encoders:
+                new_values = self.critic.head_net(features_seq).squeeze(-1)  # [B,T]
+            else:
+                new_values, _ = self.critic.sequence_forward(obs, hidden_state)
+                new_values = new_values.squeeze(-1)  # [B,T]
 
-            log_ratio = new_log_probs - old_log_probs
+            B, T = features_seq.shape[:2]
+            flat_feat = features_seq.reshape(B * T, -1)
+
+            # Flatten actions (and mask if provided) to match latent
+            flat_act = actions.reshape(B * T, -1)
+            flat_mask = (
+                action_mask.reshape(B * T, -1) if action_mask is not None else None
+            )
+
+            # ---- Log-prob of BUFFER actions under CURRENT policy ----
+            new_log_probs = self.actor.head_net.log_prob_from_latent(
+                flat_feat, flat_act, action_mask=flat_mask
+            ).view(B, T)
+
+            # ---- PPO clipped objective ----
+            log_ratio = new_log_probs - old_log_probs  # [B,T]
             ratio = torch.exp(log_ratio)
             policy_loss1 = -advantages * ratio
             policy_loss2 = -advantages * torch.clamp(
@@ -1473,81 +1506,54 @@ class ICM_PPO(RLAlgorithm):
             )
             policy_loss = torch.max(policy_loss1, policy_loss2).mean()
 
+            # Value loss (clip against old_values if provided; shapes [B,T])
             if old_values is not None:
-                v_loss_unclipped = (new_values.squeeze() - returns) ** 2
+                v_loss_unclipped = (new_values - returns) ** 2
                 v_clipped = old_values + torch.clamp(
-                    new_values.squeeze() - old_values, -self.clip_coef, self.clip_coef
+                    new_values - old_values, -self.clip_coef, self.clip_coef
                 )
                 v_loss_clipped = (v_clipped - returns) ** 2
                 value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
             else:
-                value_loss = 0.5 * ((new_values.squeeze() - returns) ** 2).mean()
+                value_loss = 0.5 * ((new_values - returns) ** 2).mean()
 
-            entropy_loss = -entropy.mean()
+            # Entropy: use analytic entropies if available, else fallback to -log_prob mean
+            if entropies is None:
+                entropy_loss = -new_log_probs.mean()
+            else:
+                entropy_loss = -entropies.mean()
+
             loss = (
                 policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss
             )
 
             with torch.no_grad():
-                approx_kl = ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
+                approx_kl = ((ratio - 1) - log_ratio).mean().item()
                 clip_fraction = (
-                    torch.mean((torch.abs(ratio - 1.0) > self.clip_coef).float())
-                ).item()
+                    (torch.abs(ratio - 1.0) > self.clip_coef).float().mean().item()
+                )
 
-            icm_total_loss, icm_i_loss, icm_f_loss = (
-                torch.tensor(0.0),
-                torch.tensor(0.0),
-                torch.tensor(0.0),
-            )
-            if self.use_shared_encoder_for_icm:
-                if latent_pi is None:
-                    raise ValueError(
-                        "latent_pi must be provided for ICM loss calculation when using shared encoder."
-                    )
+            # ---- ICM (shared-encoder case uses latent features) ----
+            icm_total_loss = torch.tensor(0.0, device=new_values.device)
+            icm_i_loss = torch.tensor(0.0, device=new_values.device)
+            icm_f_loss = torch.tensor(0.0, device=new_values.device)
 
-                flat_actions = actions.reshape(-1, actions.shape[-1])
-                flat_obs = obs.reshape(-1, obs.shape[-1])
-                flat_latent_pi = latent_pi.reshape(-1, latent_pi.shape[-1])
+            if self.use_shared_encoder_for_icm and latent_pi is not None:
+                # Build (t, t+1) pairs along time, flatten over B*(T-1)
+                obs_t = obs[:, :-1].reshape(-1, obs.shape[-1])
+                obs_tp = obs[:, 1:].reshape(-1, obs.shape[-1])
+                act_t = actions[:, :-1].reshape(-1, actions.shape[-1])
 
-                # For BPTT, we need to properly handle sequences
-                # obs has shape (batch_seq, seq_len, obs_dim), actions has shape (batch_seq, seq_len, action_dim)
-                # We need to shift observations to get next_obs
-                flat_obs = obs.reshape(
-                    -1, obs.shape[-1]
-                )  # (batch_seq * seq_len, obs_dim)
-                flat_actions = actions.reshape(
-                    -1, actions.shape[-1]
-                )  # (batch_seq * seq_len, action_dim)
-                flat_latent_pi = latent_pi.reshape(
-                    -1, latent_pi.shape[-1]
-                )  # (batch_seq * seq_len, latent_dim)
-
-                # Create shifted observations and embeddings for next timesteps
-                # We exclude the last timestep from current and first timestep from next
-                batch_seq, seq_len = obs.shape[0], obs.shape[1]
-                obs_for_icm = obs[:, :-1].reshape(
-                    -1, obs.shape[-1]
-                )  # (batch_seq * (seq_len-1), obs_dim)
-                next_obs_for_icm = obs[:, 1:].reshape(
-                    -1, obs.shape[-1]
-                )  # (batch_seq * (seq_len-1), obs_dim)
-                actions_for_icm = actions[:, :-1].reshape(
-                    -1, actions.shape[-1]
-                )  # (batch_seq * (seq_len-1), action_dim)
-                latent_pi_for_icm = latent_pi[:, :-1].reshape(
-                    -1, latent_pi.shape[-1]
-                )  # (batch_seq * (seq_len-1), latent_dim)
-                next_latent_pi_for_icm = latent_pi[:, 1:].reshape(
-                    -1, latent_pi.shape[-1]
-                )  # (batch_seq * (seq_len-1), latent_dim)
+                emb_t = latent_pi[:, :-1].reshape(-1, latent_pi.shape[-1])
+                emb_tp = latent_pi[:, 1:].reshape(-1, latent_pi.shape[-1])
 
                 icm_total_loss, icm_i_loss, icm_f_loss, _, _ = self.icm.compute_loss(
-                    obs_batch_t=obs_for_icm,
-                    action_batch_t=actions_for_icm,
-                    next_obs_batch_t=next_obs_for_icm,
-                    embedded_obs=latent_pi_for_icm,
-                    embedded_next_obs=next_latent_pi_for_icm,
-                    hidden_state=None,  # TODO: Handle ICM hidden states in BPTT
+                    obs_batch_t=obs_t,
+                    action_batch_t=act_t,
+                    next_obs_batch_t=obs_tp,
+                    embedded_obs=emb_t,
+                    embedded_next_obs=emb_tp,
+                    hidden_state=None,
                     hidden_state_next=None,
                 )
                 loss += self.icm_loss_weight * icm_total_loss
@@ -1563,89 +1569,79 @@ class ICM_PPO(RLAlgorithm):
                 "icm_i_loss": icm_i_loss,
                 "icm_f_loss": icm_f_loss,
             }
+
+        # ---------------------- FLAT (non-BPTT) path ----------------------
+        # Get values/entropy (no sampling) and the latent features
+        _, _, entropy_t, new_value_t, _, latent = self._get_action_and_values(
+            obs, hidden_state=hidden_state, sample=False
+        )
+
+        # Log-prob of buffer actions under CURRENT policy
+        new_log_prob_t = self.actor.head_net.log_prob_from_latent(
+            latent, actions, action_mask=None
+        )
+
+        # Entropy fallback for squashed Box
+        if entropy_t is None:
+            entropy_t = -new_log_prob_t
+
+        ratio = torch.exp(new_log_prob_t - old_log_probs)
+        policy_loss1 = -advantages * ratio
+        policy_loss2 = -advantages * torch.clamp(
+            ratio, 1 - self.clip_coef, 1 + self.clip_coef
+        )
+        policy_loss = torch.max(policy_loss1, policy_loss2).mean()
+
+        if old_values is not None:
+            v_loss_unclipped = (new_value_t.squeeze() - returns) ** 2
+            v_clipped = old_values + torch.clamp(
+                new_value_t.squeeze() - old_values, -self.clip_coef, self.clip_coef
+            )
+            v_loss_clipped = (v_clipped - returns) ** 2
+            value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
         else:
-            # Get values and next hidden state (which we ignore in flat learning)
-            _, _, entropy_t, new_value_t, _, latent_pi = self._get_action_and_values(
-                obs,
+            value_loss = 0.5 * ((new_value_t.squeeze() - returns) ** 2).mean()
+
+        entropy_loss = -entropy_t.mean()
+        loss = policy_loss + self.vf_coef * value_loss + self.ent_coef * entropy_loss
+
+        with torch.no_grad():
+            log_ratio = new_log_prob_t - old_log_probs
+            approx_kl = ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
+            clip_fraction = (
+                (torch.abs(ratio - 1.0) > self.clip_coef).float().mean().item()
+            )
+
+        icm_total_loss = torch.tensor(0.0, device=new_value_t.device)
+        icm_i_loss = torch.tensor(0.0, device=new_value_t.device)
+        icm_f_loss = torch.tensor(0.0, device=new_value_t.device)
+
+        # ICM loss (shared-encoder case)
+        next_obs = kwargs.get("next_obs", None)
+        if self.use_shared_encoder_for_icm and next_obs is not None:
+            latent_next = self.actor.extract_features(next_obs)
+            icm_total_loss, icm_i_loss, icm_f_loss, _, _ = self.icm.compute_loss(
+                obs_batch_t=obs,
+                action_batch_t=actions,
+                next_obs_batch_t=next_obs,
+                embedded_obs=latent,
+                embedded_next_obs=latent_next,
                 hidden_state=hidden_state,
-                sample=False,  # No need to sample here
+                hidden_state_next=hidden_state,  # TODO: wire real next hidden if needed
             )
-
-            # Compute log prob of taken actions
-            new_log_prob_t = self.actor.head_net.log_prob_from_latent(
-                latent_pi, actions, action_mask=None
-            )
-
-            # Use -log_prob as entropy when head returns None (continuous actions w/ squashing)
-            if entropy_t is None:
-                entropy_t = -new_log_prob_t
-
-            ratio = torch.exp(new_log_prob_t - old_log_probs)
-            policy_loss1 = -advantages * ratio
-            policy_loss2 = -advantages * torch.clamp(
-                ratio, 1 - self.clip_coef, 1 + self.clip_coef
-            )
-            policy_loss = torch.max(policy_loss1, policy_loss2).mean()
-
-            if old_values is not None:
-                v_loss_unclipped = (new_value_t.squeeze() - returns) ** 2
-                v_clipped = old_values + torch.clamp(
-                    new_value_t.squeeze() - old_values, -self.clip_coef, self.clip_coef
-                )
-                v_loss_clipped = (v_clipped - returns) ** 2
-                value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
-            else:
-                value_loss = 0.5 * ((new_value_t.squeeze() - returns) ** 2).mean()
-            entropy_loss = -entropy_t.mean()
-
-            loss = (
-                policy_loss + self.vf_coef * value_loss + self.ent_coef * entropy_loss
-            )
-
-            with torch.no_grad():
-                log_ratio = new_log_prob_t - old_log_probs
-                approx_kl = ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
-                clip_fraction = (
-                    torch.mean((torch.abs(ratio - 1.0) > self.clip_coef).float())
-                ).item()
-
-            icm_total_loss, icm_i_loss, icm_f_loss = (
-                torch.tensor(0.0),
-                torch.tensor(0.0),
-                torch.tensor(0.0),
-            )
-
-            # Get next observations for ICM
-            next_obs = kwargs.get("next_obs", None)
-
-            if self.use_shared_encoder_for_icm and next_obs is not None:
-                # Extract features for next observations
-                latent_pi_next = self.actor.extract_features(next_obs)
-
-                # Compute ICM loss with proper current and next observations/embeddings
-                icm_total_loss, icm_i_loss, icm_f_loss, _, _ = self.icm.compute_loss(
-                    obs_batch_t=obs,
-                    action_batch_t=actions,
-                    next_obs_batch_t=next_obs,
-                    embedded_obs=latent_pi,
-                    embedded_next_obs=latent_pi_next,
-                    hidden_state=hidden_state,
-                    hidden_state_next=hidden_state,  # TODO: Handle hidden states properly
-                )
-
             loss += self.icm_loss_weight * icm_total_loss
 
-            return {
-                "loss": loss,
-                "policy_loss": policy_loss,
-                "value_loss": value_loss,
-                "entropy_loss": entropy_loss,
-                "approx_kl": approx_kl,
-                "clip_fraction": clip_fraction,
-                "icm_total_loss": icm_total_loss,
-                "icm_i_loss": icm_i_loss,
-                "icm_f_loss": icm_f_loss,
-            }
+        return {
+            "loss": loss,
+            "policy_loss": policy_loss,
+            "value_loss": value_loss,
+            "entropy_loss": entropy_loss,
+            "approx_kl": approx_kl,
+            "clip_fraction": clip_fraction,
+            "icm_total_loss": icm_total_loss,
+            "icm_i_loss": icm_i_loss,
+            "icm_f_loss": icm_f_loss,
+        }
 
     def get_intrinsic_reward(
         self,

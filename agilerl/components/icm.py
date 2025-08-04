@@ -259,9 +259,7 @@ class ICMFeatureEncoder(EvolvableModule):
         return init_dict
 
     def get_output_dim(self):
-        return (
-            self.output_dim
-        )  # Required by EvolvableModule if not using `num_outputs` directly in constructor
+        return self.output_dim  # Required by EvolvableModule if not using `num_outputs` directly in constructor
 
     def clone(self):
         """Returns a deep copy of the module."""
@@ -483,8 +481,8 @@ class ICM(EvolvableModule):
         self.accelerator = accelerator
         self.use_internal_encoder = use_internal_encoder
 
-        self.register_buffer("ri_mean", torch.zeros(1))
-        self.register_buffer("ri_var", torch.ones(1))
+        self.register_buffer("ri_mean", torch.zeros(1, device=device))
+        self.register_buffer("ri_var", torch.ones(1, device=device))
         self.ri_momentum = 0.999  # EMA
 
         if not isinstance(
