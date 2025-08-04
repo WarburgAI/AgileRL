@@ -106,8 +106,8 @@ def run_demo():
 
     # --- Create Environment and Population ---
     n_symbols = 5
-    delay_steps = 5
-    num_envs = 64  # Can be higher for faster training
+    delay_steps = 6
+    num_envs = 128  # Can be higher for faster training
 
     if recurrent:
         NET_CONFIG = {
@@ -119,14 +119,14 @@ def run_demo():
     else:
         NET_CONFIG = {
             "encoder_config": {
-                "hidden_size": [64],
+                "hidden_size": 64,
             },
         }
 
     # Hyperparameters
     INIT_HP = {
         "POP_SIZE": 2,  # Population size
-        "BATCH_SIZE": 256,
+        "BATCH_SIZE": 512,
         "LEARN_STEP": (delay_steps + 2),  # Match episode length (delay_steps + 2)
         "LR": 1e-4,
         "GAMMA": 0.99,

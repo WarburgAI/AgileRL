@@ -267,9 +267,9 @@ class TorchDistribution:
         squash_output: bool = False,
     ) -> None:
         if isinstance(distribution, list):
-            assert all(
-                isinstance(d, Categorical) for d in distribution
-            ), "Only list of Categorical distributions are supported (for MultiDiscrete action spaces)."
+            assert all(isinstance(d, Categorical) for d in distribution), (
+                "Only list of Categorical distributions are supported (for MultiDiscrete action spaces)."
+            )
 
         self.distribution = distribution
         self.squash_output = squash_output
@@ -443,17 +443,17 @@ class EvolvableDistribution(EvolvableWrapper):
         return TorchDistribution(dist, self.squash_output)
 
     def log_prob(self, action: torch.Tensor) -> torch.Tensor:
-        if not self.squash_output:
-            return self._handler.log_prob(self.distribution, action)
+        """Get the log probability of the action.
 
-        # !IMPORTANT: Should we use the dist here ?
-        # Squashed (Box): a = tanh(u)  => u = atanh(a)
-        a = torch.clamp(action, -0.999999, 0.999999)
-        pre_squash = 0.5 * (torch.log1p(a) - torch.log1p(-a))  # atanh(a)
-        logp = self._handler.log_prob(self.distribution, pre_squash)
-        logp -= torch.log(1 - a.pow(2) + 1e-6).sum(dim=1)  # Jacobian term
+        :param action: Action.
+        :type action: torch.Tensor
+        :return: Log probability of the action.
+        :rtype: torch.Tensor
+        """
+        if self.dist is None:
+            raise ValueError("Distribution not initialized. Call forward first.")
 
-        return logp
+        return self.dist.log_prob(action)
 
     def entropy(self) -> torch.Tensor:
         """Get the entropy of the action distribution.
@@ -564,6 +564,7 @@ class EvolvableDistribution(EvolvableWrapper):
 
         if deterministic:
             action = self.dist.mode()
+            log_prob = self.dist.log_prob(action)
         elif sample:
             action = self.dist.sample()
             log_prob = self.dist.log_prob(action)
