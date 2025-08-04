@@ -19,13 +19,9 @@ from agilerl.networks import EvolvableNetwork, StochasticActor
 from agilerl.networks.value_networks import ValueNetwork
 from agilerl.typing import ArrayOrTensor, BPTTSequenceType, ExperiencesType, GymEnvType
 from agilerl.utils.algo_utils import (
-    flatten_experiences,
-    get_experiences_samples,
-    is_vectorized_experiences,
     make_safe_deepcopies,
     obs_channels_to_first,
     share_encoder_parameters,
-    stack_experiences,
 )
 from agilerl.utils.metrics import MetricsTracker, TimingTracker
 
