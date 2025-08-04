@@ -1070,53 +1070,72 @@ class ICM_PPO(RLAlgorithm):
                         clip_grad_norm_(self.icm.parameters(), self.max_grad_norm)
                     self.optimizer.step()
 
-                if mb_latent_pi is None:  # i.e. not using shared encoder
-                    # For non-shared encoder, ICM uses its own encoder and optimizer
-                    if mb_next_obs is not None:
-                        # Get ICM hidden states if available
-                        icm_hidden_state = None
-                        icm_next_hidden_state = None
+                if mb_latent_pi is None and mb_next_obs is not None:
+                    icm_hidden_state = None
+                    if self.recurrent and self.icm.is_recurrent:
+                        if "icm_hidden_states" in minibatch_td.keys(
+                            include_nested=True
+                        ):
+                            icm_hidden_states_td = minibatch_td.get("icm_hidden_states")
+                            icm_hidden_state = {
+                                k.replace("icm_encoder_", ""): v.permute(1, 0, 2)
+                                .contiguous()
+                                .to(self.device)
+                                for k, v in icm_hidden_states_td.items()
+                            }
 
-                        if self.recurrent and self.icm.is_recurrent:
-                            if "icm_hidden_states" in minibatch_td.keys(
-                                include_nested=True
-                            ):
-                                icm_hidden_states_td = minibatch_td.get(
-                                    "icm_hidden_states"
-                                )
-                                icm_hidden_state = {
-                                    # Remove 'icm_encoder_' prefix and permute from (batch, layers, hidden) to (layers, batch, hidden)
-                                    k.replace("icm_encoder_", ""): v.permute(
-                                        1, 0, 2
-                                    ).contiguous()
-                                    for k, v in icm_hidden_states_td.items()
-                                }
+                    # Initialize losses
+                    icm_total_loss = 0.0
+                    icm_i_loss = 0.0
+                    icm_f_loss = 0.0
+                    batch_size = mb_obs.shape[0]
 
-                            if "icm_next_hidden_states" in minibatch_td.keys(
-                                include_nested=True
-                            ):
-                                icm_next_hidden_states_td = minibatch_td.get(
-                                    "icm_next_hidden_states"
-                                )
-                                icm_next_hidden_state = {
-                                    k.replace("icm_encoder_", ""): v.permute(
-                                        1, 0, 2
-                                    ).contiguous()
-                                    for k, v in icm_next_hidden_states_td.items()
-                                }
+                    # Process each step independently
+                    current_hidden = icm_hidden_state
+                    for i in range(batch_size):
+                        obs_i = mb_obs[i : i + 1]  # Add batch dim
+                        next_obs_i = mb_next_obs[i : i + 1]
+                        action_i = mb_actions[i : i + 1]
 
-                        icm_total_loss, icm_i_loss, icm_f_loss, _, _ = self.icm.update(
-                            obs_batch=mb_obs,
-                            action_batch=mb_actions,
-                            next_obs_batch=mb_next_obs,
-                            hidden_state_obs=icm_hidden_state,
-                            hidden_state_next_obs=icm_next_hidden_state,
+                        phi_i, phi_next_i, next_hidden_obs, next_hidden_next = (
+                            self.icm.embed_obs(
+                                obs_batch=obs_i,
+                                next_obs_batch=next_obs_i,
+                                hidden_state_obs=current_hidden,
+                                hidden_state_next_obs=current_hidden,
+                            )
                         )
-                        if hasattr(self, "icm_optimizer"):
-                            self.icm_optimizer.zero_grad()
-                            icm_total_loss.backward()
-                            clip_grad_norm_(self.icm.parameters(), self.max_grad_norm)
-                            self.icm_optimizer.step()
+
+                        step_total, step_i, step_f, _, _ = self.icm.compute_loss(
+                            obs_batch_t=obs_i,
+                            action_batch_t=action_i,
+                            next_obs_batch_t=next_obs_i,
+                            embedded_obs=phi_i,
+                            embedded_next_obs=phi_next_i,
+                            hidden_state=next_hidden_obs,
+                            hidden_state_next=next_hidden_next,
+                        )
+
+                        icm_total_loss += step_total
+                        icm_i_loss += step_i
+                        icm_f_loss += step_f
+
+                        current_hidden = next_hidden_next or next_hidden_obs
+
+                    # Average
+                    icm_total_loss /= batch_size
+                    icm_i_loss /= batch_size
+                    icm_f_loss /= batch_size
+
+                    # Backward etc. (same as before)
+                    if hasattr(self, "icm_optimizer"):
+                        self.icm_optimizer.zero_grad()
+                        icm_total_loss.backward()
+                        torch.nn.utils.clip_grad_norm_(
+                            self.icm.parameters(), self.max_grad_norm
+                        )
+                        self.icm_optimizer.step()
+
                     self.learn_metrics.add("icm_total_loss", icm_total_loss.item())
                     self.learn_metrics.add("icm_i_loss", icm_i_loss.item())
                     self.learn_metrics.add("icm_f_loss", icm_f_loss.item())
@@ -1347,62 +1366,80 @@ class ICM_PPO(RLAlgorithm):
                         clip_grad_norm_(self.icm.parameters(), self.max_grad_norm)
                     self.optimizer.step()
 
-                if mb_latent_pi is None:  # i.e. not using shared encoder
-                    # Get ICM-specific hidden states
+                if mb_latent_pi is None:  # non-shared
+                    # Get ICM-specific hidden states - mb_initial_hidden_states_dict is {key: (layers, batch_seq, hidden)}
                     icm_initial_hidden_states = None
                     if (
                         self.recurrent
                         and self.icm.is_recurrent
                         and mb_initial_hidden_states_dict is not None
                     ):
-                        # Filter out ICM-specific hidden states
-                        icm_initial_hidden_states = {}
-                        for key, val in mb_initial_hidden_states_dict.items():
-                            if key.startswith("icm_encoder_"):
-                                # Remove prefix and permute from (batch, layers, hidden) to (layers, batch, hidden)
-                                clean_key = key.replace("icm_encoder_", "")
-                                icm_initial_hidden_states[clean_key] = (
-                                    val.permute(1, 0, 2).contiguous().to(self.device)
-                                )
+                        icm_initial_hidden_states = {
+                            k.replace("icm_encoder_", ""): v.to(self.device)
+                            for k, v in mb_initial_hidden_states_dict.items()
+                            if k.startswith("icm_encoder_")
+                        }
 
-                    # Reshape observations and actions for BPTT
+                    # Reshape to (batch_seq, seq_len, *) for sequential processing
                     batch_seq_size, seq_len = mb_obs_seq.shape[:2]
-                    obs_seq_reshaped = mb_obs_seq[:, :-1].reshape(
-                        -1, *mb_obs_seq.shape[2:]
-                    )
-                    next_obs_seq_reshaped = mb_obs_seq[:, 1:].reshape(
-                        -1, *mb_obs_seq.shape[2:]
-                    )
-                    actions_seq_reshaped = mb_actions_seq[:, :-1].reshape(
-                        -1, *mb_actions_seq.shape[2:]
-                    )
+                    obs_seq = mb_obs_seq  # (batch_seq, seq_len, *)
+                    actions_seq = mb_actions_seq  # (batch_seq, seq_len, *)
 
-                    # Expand hidden states for all timesteps if needed
-                    icm_hidden_expanded = None
-                    if icm_initial_hidden_states is not None:
-                        icm_hidden_expanded = {}
-                        for key, val in icm_initial_hidden_states.items():
-                            # val shape: (layers, batch_seq_size, hidden)
-                            # Expand to (layers, batch_seq_size * (seq_len-1), hidden)
-                            layers, _, hidden = val.shape
-                            val_expanded = val.unsqueeze(2).expand(
-                                layers, batch_seq_size, seq_len - 1, hidden
+                    # Initialize losses
+                    icm_total_loss = 0.0
+                    icm_i_loss = 0.0
+                    icm_f_loss = 0.0
+
+                    # Process sequence step-by-step for recurrent ICM
+                    current_hidden = icm_initial_hidden_states
+                    for t in range(seq_len - 1):  # Pairs (t, t+1)
+                        obs_t = obs_seq[:, t]
+                        next_obs_t = obs_seq[:, t + 1]
+                        action_t = actions_seq[:, t]
+
+                        # Compute embeddings with current hidden
+                        phi_t, phi_next, next_hidden_obs, next_hidden_next = (
+                            self.icm.embed_obs(
+                                obs_batch=obs_t,
+                                next_obs_batch=next_obs_t,
+                                hidden_state_obs=current_hidden,
+                                hidden_state_next_obs=current_hidden,  # Start from same for next_obs; update properly if needed
                             )
-                            val_expanded = val_expanded.reshape(layers, -1, hidden)
-                            icm_hidden_expanded[key] = val_expanded
+                        )
 
-                    icm_total_loss, icm_i_loss, icm_f_loss, _, _ = self.icm.update(
-                        obs_batch=obs_seq_reshaped,
-                        action_batch=actions_seq_reshaped,
-                        next_obs_batch=next_obs_seq_reshaped,
-                        hidden_state_obs=icm_hidden_expanded,
-                        hidden_state_next_obs=icm_hidden_expanded,  # TODO: Properly handle sequential hidden states
-                    )
+                        # Compute losses for this pair
+                        step_total, step_i, step_f, _, _ = self.icm.compute_loss(
+                            obs_batch_t=obs_t,
+                            action_batch_t=action_t,
+                            next_obs_batch_t=next_obs_t,
+                            embedded_obs=phi_t,
+                            embedded_next_obs=phi_next,
+                            hidden_state=next_hidden_obs,
+                            hidden_state_next=next_hidden_next,
+                        )
 
+                        icm_total_loss += step_total
+                        icm_i_loss += step_i
+                        icm_f_loss += step_f
+
+                        # Advance hidden state
+                        current_hidden = (
+                            next_hidden_next or next_hidden_obs
+                        )  # Use next if available
+
+                    # Average losses over sequence
+                    num_pairs = seq_len - 1
+                    icm_total_loss /= num_pairs
+                    icm_i_loss /= num_pairs
+                    icm_f_loss /= num_pairs
+
+                    # Backward and clip
                     if hasattr(self, "icm_optimizer"):
                         self.icm_optimizer.zero_grad()
                         icm_total_loss.backward()
-                        clip_grad_norm_(self.icm.parameters(), self.max_grad_norm)
+                        torch.nn.utils.clip_grad_norm_(
+                            self.icm.parameters(), self.max_grad_norm
+                        )
                         self.icm_optimizer.step()
 
                     self.learn_metrics.add("icm_total_loss", icm_total_loss.item())
