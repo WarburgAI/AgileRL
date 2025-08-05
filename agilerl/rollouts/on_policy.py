@@ -520,9 +520,9 @@ def _collect_rollouts(
                             :, finished_mask, :
                         ]
                         if reset_states_for_key.shape[1] > 0:
-                            agent.hidden_state[key][
-                                :, finished_mask, :
-                            ] = reset_states_for_key
+                            agent.hidden_state[key][:, finished_mask, :] = (
+                                reset_states_for_key
+                            )
 
             # Handle episode endings through hooks
             for hook in hooks:
