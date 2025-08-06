@@ -20,7 +20,7 @@ from agilerl.algorithms import (
     DDPG,
     DQN,
     GRPO,
-    PBIM_ICM_PPO as ICM_PPO,
+    ICM_PPO,
     IPPO,
     MADDPG,
     MATD3,
