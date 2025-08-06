@@ -14,9 +14,6 @@ from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 
 # Imports managed by the broader environment, placeholders for linting/type-checking
-from agilerl.components.icm import (
-    ICM,
-)
 from agilerl.components.rollout_buffer import RolloutBuffer
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
@@ -170,6 +167,8 @@ class ICM_PPO(RLAlgorithm):
     :type icm_forward_net_config: Optional[Dict[str, Any]], optional
     :param icm_loss_weight: Weight of the ICM loss in the total loss, defaults to 0.1
     :type icm_loss_weight: float, optional
+    :param pbim: Whether to use PBIM, defaults to False
+    :type pbim: bool, optional
     """
 
     def __init__(
@@ -214,6 +213,7 @@ class ICM_PPO(RLAlgorithm):
         icm_inverse_net_config: Optional[Dict[str, Any]] = None,
         icm_forward_net_config: Optional[Dict[str, Any]] = None,
         icm_loss_weight: float = 0.1,
+        pbim: bool = False,
     ):
         super().__init__(
             observation_space,
@@ -458,6 +458,11 @@ class ICM_PPO(RLAlgorithm):
                 },
             }
             icm_init_params["encoder_net_config"] = self.icm_net_encoder_config
+
+        if pbim:
+            from agilerl.algorithms.pbim_icm_ppo import PBIM_ICM as ICM
+        else:
+            from agilerl.components.icm import ICM
 
         self.icm = ICM(**icm_init_params)
 

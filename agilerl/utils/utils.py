@@ -20,7 +20,7 @@ from agilerl.algorithms import (
     DDPG,
     DQN,
     GRPO,
-    ICM_PPO,
+    PBIM_ICM_PPO as ICM_PPO,
     IPPO,
     MADDPG,
     MATD3,
@@ -608,7 +608,7 @@ def create_population(
 
     elif algo == "ICM_PPO":
         for idx in range(population_size):
-            agent = ICM_PPO(
+            agent = PBIM_ICM_PPO(
                 observation_space=observation_space,
                 action_space=action_space,
                 index=idx,
@@ -629,6 +629,7 @@ def create_population(
                 share_encoders=INIT_HP.get("SHARE_ENCODERS", True),
                 actor_network=actor_network,
                 critic_network=critic_network,
+                pbim=INIT_HP.get("pbim", False),
                 device=device,
                 accelerator=accelerator,
                 num_envs=num_envs,
@@ -636,7 +637,6 @@ def create_population(
                 **algo_kwargs,
             )
             population.append(agent)
-
     else:
         raise ValueError(f"Algorithm {algo} not supported")
 

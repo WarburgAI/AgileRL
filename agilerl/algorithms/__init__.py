@@ -15,7 +15,7 @@ from .neural_ucb_bandit import NeuralUCB
 from .ppo import PPO
 from .td3 import TD3
 from .cvar_ppo import CPPO
-from .icm_ppo import ICM_PPO
+from .pbim_icm_ppo import PBIM_ICM_PPO as ICM_PPO
 
 __all__ = [
     "BC_LM",
