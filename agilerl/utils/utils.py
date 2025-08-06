@@ -608,7 +608,7 @@ def create_population(
 
     elif algo == "ICM_PPO":
         for idx in range(population_size):
-            agent = PBIM_ICM_PPO(
+            agent = ICM_PPO(
                 observation_space=observation_space,
                 action_space=action_space,
                 index=idx,
