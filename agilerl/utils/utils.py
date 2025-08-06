@@ -7,6 +7,7 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import tqdm
 import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
@@ -14,10 +15,12 @@ from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
 from agilerl.algorithms import (
+    CPPO,
     CQN,
     DDPG,
     DQN,
     GRPO,
+    ICM_PPO,
     IPPO,
     MADDPG,
     MATD3,
@@ -31,9 +34,10 @@ from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.modules.base import EvolvableModule
+from agilerl.modules import EvolvableModule
 from agilerl.typing import GymSpaceType, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
+from agilerl.utils.llm_utils import DummyOptimizer
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 SupportedObservationSpace = Union[
@@ -104,9 +108,6 @@ def make_skill_vect_envs(
     :param skill: Skill wrapper to apply to environment
     :type skill: agilerl.wrappers.learning.Skill
     :param num_envs: Number of vectorized environments, defaults to 1
-    :param skill: Skill wrapper to apply to environment
-    :type skill: agilerl.wrappers.learning.Skill
-    :param num_envs: Number of vectorized environments, defaults to 1
     :type num_envs: int, optional
     """
     return gym.vector.AsyncVectorEnv(
@@ -154,6 +155,42 @@ def observation_space_channels_to_first(
     return observation_space
 
 
+def default_progress_bar(
+    max_steps: int,
+    accelerator: Optional[Accelerator] = None,
+) -> tqdm.tqdm:
+    """Returns a default progress bar.
+
+    :param max_steps: Maximum number of steps
+    :type max_steps: int
+    :param accelerator: Accelerator for distributed computing, defaults to None
+    :type accelerator: accelerate.Accelerator(), optional
+    :return: Progress bar
+    :rtype: tqdm.tqdm
+    """
+    bar_format = (
+        "🚀 Training Progress │ "
+        "{percentage:3.0f}% │ "
+        "{bar:20} │ "
+        "{n_fmt}/{total_fmt} steps │ "
+        "⏱️ {elapsed} │ "
+        "⏳ {remaining} │ "
+        "{rate_fmt}"
+        "{postfix}"
+    )
+    disable = (
+        not accelerator.is_local_main_process if accelerator is not None else False
+    )
+    return tqdm.trange(
+        max_steps,
+        unit="step",
+        bar_format=bar_format,
+        ascii=False,
+        dynamic_ncols=True,
+        disable=disable,
+    )
+
+
 def create_population(
     algo: str,
     observation_space: GymSpaceType,
@@ -182,20 +219,8 @@ def create_population(
     :type action_space: spaces.Space
     :param net_config: Network configuration
     :type net_config: dict or None
-    :param observation_space: Observation space
-    :type observation_space: spaces.Space
-    :param action_space: Action space
-    :type action_space: spaces.Space
-    :param net_config: Network configuration
-    :type net_config: dict or None
     :param INIT_HP: Initial hyperparameters
     :type INIT_HP: dict
-    :param hp_config: Choice of algorithm hyperparameters to mutate during training, defaults to None
-    :type hp_config: HyperparameterConfig, optional
-    :param actor_network: Custom actor network, defaults to None
-    :type actor_network: nn.Module, optional
-    :param critic_network: Custom critic network, defaults to None
-    :type critic_network: nn.Module, optional
     :param hp_config: Choice of algorithm hyperparameters to mutate during training, defaults to None
     :type hp_config: HyperparameterConfig, optional
     :param actor_network: Custom actor network, defaults to None
@@ -329,6 +354,7 @@ def create_population(
                 device=device,
                 accelerator=accelerator,
                 num_envs=num_envs,
+                torch_compiler=torch_compiler,
                 **algo_kwargs,
             )
             population.append(agent)
@@ -454,51 +480,21 @@ def create_population(
                 index=idx,
                 hp_config=hp_config,
                 net_config=net_config,
-                batch_size=INIT_HP["BATCH_SIZE"],
-                lr=INIT_HP["LR"],
-                learn_step=INIT_HP["LEARN_STEP"],
-                gamma=INIT_HP["GAMMA"],
-                gae_lambda=INIT_HP["GAE_LAMBDA"],
-                action_std_init=INIT_HP["ACTION_STD_INIT"],
-                clip_coef=INIT_HP["CLIP_COEF"],
-                ent_coef=INIT_HP["ENT_COEF"],
-                vf_coef=INIT_HP["VF_COEF"],
-                max_grad_norm=INIT_HP["MAX_GRAD_NORM"],
-                target_kl=INIT_HP["TARGET_KL"],
-                update_epochs=INIT_HP["UPDATE_EPOCHS"],
+                batch_size=INIT_HP.get("BATCH_SIZE", 64),
+                lr=INIT_HP.get("LR", 0.0001),
+                learn_step=INIT_HP.get("LEARN_STEP", 2048),
+                gamma=INIT_HP.get("GAMMA", 0.99),
+                gae_lambda=INIT_HP.get("GAE_LAMBDA", 0.95),
+                action_std_init=INIT_HP.get("ACTION_STD_INIT", 0.0),
+                clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
+                ent_coef=INIT_HP.get("ENT_COEF", 0.01),
+                vf_coef=INIT_HP.get("VF_COEF", 0.5),
+                max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.5),
+                target_kl=INIT_HP.get("TARGET_KL"),
+                update_epochs=INIT_HP.get("UPDATE_EPOCHS", 4),
                 actor_networks=actor_network,
                 critic_networks=critic_network,
                 action_batch_size=INIT_HP.get("ACTION_BATCH_SIZE", None),
-                device=device,
-                accelerator=accelerator,
-                torch_compiler=torch_compiler,
-                **algo_kwargs,
-            )
-            population.append(agent)
-
-    elif algo == "IPPO":
-        for idx in range(population_size):
-            agent = IPPO(
-                observation_spaces=observation_space,
-                action_spaces=action_space,
-                agent_ids=INIT_HP["AGENT_IDS"],
-                index=idx,
-                hp_config=hp_config,
-                net_config=net_config,
-                batch_size=INIT_HP["BATCH_SIZE"],
-                lr=INIT_HP["LR"],
-                learn_step=INIT_HP["LEARN_STEP"],
-                gamma=INIT_HP["GAMMA"],
-                gae_lambda=INIT_HP["GAE_LAMBDA"],
-                action_std_init=INIT_HP["ACTION_STD_INIT"],
-                clip_coef=INIT_HP["CLIP_COEF"],
-                ent_coef=INIT_HP["ENT_COEF"],
-                vf_coef=INIT_HP["VF_COEF"],
-                max_grad_norm=INIT_HP["MAX_GRAD_NORM"],
-                target_kl=INIT_HP["TARGET_KL"],
-                update_epochs=INIT_HP["UPDATE_EPOCHS"],
-                actor_networks=actor_network,
-                critic_networks=critic_network,
                 device=device,
                 accelerator=accelerator,
                 torch_compiler=torch_compiler,
@@ -553,9 +549,7 @@ def create_population(
             agent = GRPO(
                 observation_space=observation_space,
                 action_space=action_space,
-                actor_network=clone_llm(
-                    actor_network, state_dict=actor_network.state_dict()
-                ),
+                actor_network=clone_llm(actor_network, actor_network.state_dict()),
                 pad_token_id=INIT_HP.get("PAD_TOKEN_ID"),
                 hp_config=hp_config,
                 index=idx,
@@ -638,6 +632,7 @@ def create_population(
                 device=device,
                 accelerator=accelerator,
                 num_envs=num_envs,
+                torch_compiler=torch_compiler,
                 **algo_kwargs,
             )
             population.append(agent)
@@ -799,6 +794,7 @@ def init_wandb(
     wandb_api_key: Optional[str] = None,
     accelerator: Optional[Accelerator] = None,
     project: str = "AgileRL",
+    addl_args: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Initializes wandb for logging hyperparameters and run metadata.
 
@@ -813,6 +809,8 @@ def init_wandb(
     :param wandb_api_key: Wandb API key, defaults to None
     :type wandb_api_key: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
+    :param addl_args: Additional kwargs to pass to wandb.init()
+    :type addl_args: dict, optional
     """
     if not hasattr(wandb, "api"):
         if wandb_api_key is not None:
@@ -826,29 +824,26 @@ def init_wandb(
     if mutation_hyperparams is not None:
         config_dict.update(mutation_hyperparams)
 
+    kwargs = {
+        # track hyperparameters and run metadata
+        "config": config_dict,
+        # set the wandb project where this run will be logged
+        "project": project,
+        "name": "{}-EvoHPO-{}-{}".format(
+            env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
+        ),
+    }
+
+    if addl_args is not None:
+        kwargs.update(addl_args)
+
     if accelerator is not None:
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
-            wandb.init(
-                # set the wandb project where this run will be logged
-                project=project,
-                name="{}-EvoHPO-{}-{}".format(
-                    env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
-                ),
-                # track hyperparameters and run metadata
-                config=config_dict,
-            )
+            wandb.init(**kwargs)
         accelerator.wait_for_everyone()
     else:
-        wandb.init(
-            # set the wandb project where this run will be logged
-            project=project,
-            name="{}-EvoHPO-{}-{}".format(
-                env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
-            ),
-            # track hyperparameters and run metadata
-            config=config_dict,
-        )
+        wandb.init(**kwargs)
 
 
 def calculate_vectorized_scores(
@@ -920,16 +915,8 @@ def print_hyperparams(pop: PopulationType) -> None:
 
     :param pop: Population of agents
     :type pop: list[EvolvableAlgorithm]
-    :type pop: list[EvolvableAlgorithm]
     """
     for agent in pop:
-        print(
-            "Agent ID: {}    Mean 5 Fitness: {:.2f}    Attributes: {}".format(
-                agent.index,
-                np.mean(agent.fitness[-5:]),
-                EvolvableAlgorithm.inspect_attributes(agent),
-            )
-        )
         print(
             "Agent ID: {}    Mean 5 Fitness: {:.2f}    Attributes: {}".format(
                 agent.index,
@@ -943,7 +930,6 @@ def plot_population_score(pop: PopulationType) -> None:
     """Plots the fitness scores of agents in a population.
 
     :param pop: Population of agents
-    :type pop: list[EvolvableAlgorithm]
     :type pop: list[EvolvableAlgorithm]
     """
     plt.figure()
@@ -1004,14 +990,15 @@ def aggregate_metrics_across_gpus(
     return avg_metrics
 
 
-def save_llm_checkpoint(agent: EvolvableAlgorithm, checkpoint_path: str | None) -> None:
+def save_llm_checkpoint(agent: LLMAlgorithm, checkpoint_path: str | None) -> None:
     """Checkpoint the LLM
 
     :param agent: Agent
-    :type agent: EvolvableAlgorithm
+    :type agent: LLMAlgorithm
     :param checkpoint_path: Checkpoint path
     :type checkpoint_path: str
     """
+    assert agent.actor is not None, "Actor is not initialized"
     base_path = "./saved_checkpoints" if checkpoint_path is None else checkpoint_path
     path = base_path + f"/{agent.algo}"
     os.makedirs(path, exist_ok=True)
@@ -1023,7 +1010,7 @@ def save_llm_checkpoint(agent: EvolvableAlgorithm, checkpoint_path: str | None) 
         agent.actor.save_pretrained(path)
 
 
-def consolidate_mutations(population: PopulationType) -> None:
+def consolidate_mutations(population: list[LLMAlgorithm]) -> None:
     """Consolidate mutations across processes during LLM fintuning
 
     :param population: Population of agents
@@ -1033,6 +1020,7 @@ def consolidate_mutations(population: PopulationType) -> None:
         warnings.warn("Consolidate mutations is only supported for LLMAlgorithm.")
         return
     for agent in population:
+        assert agent.actor is not None, "Actor is not initialized"
         index, mut, mut_value = broadcast_object_list(
             [
                 agent.index,
@@ -1045,4 +1033,14 @@ def consolidate_mutations(population: PopulationType) -> None:
         agent.mut = mut
         setattr(agent, mut, mut_value)
         if mut == "lr":
-            LLMAlgorithm.update_lr(agent.optimizer, getattr(agent, mut))
+            opt = (
+                agent.optimizer
+                if not isinstance(agent.optimizer.optimizer, DummyOptimizer)
+                else agent.actor.optimizer
+            )
+            agent.accelerator, agent.lr_scheduler = LLMAlgorithm.update_lr(
+                opt,
+                getattr(agent, mut),
+                agent.accelerator,
+                agent.cosine_lr_schedule_config,
+            )

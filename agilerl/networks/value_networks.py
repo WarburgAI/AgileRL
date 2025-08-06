@@ -7,7 +7,7 @@ from gymnasium import spaces
 from agilerl.modules import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork
-from agilerl.typing import ConfigType, TorchObsType
+from agilerl.typing import NetConfigType, TorchObsType
 
 
 class ValueNetwork(EvolvableNetwork):
@@ -21,15 +21,13 @@ class ValueNetwork(EvolvableNetwork):
         automatically built using an AgileRL module according the observation space.
     :type encoder_cls: Optional[Union[str, Type[EvolvableModule]]]
     :param encoder_config: Configuration of the encoder.
-    :type encoder_config: ConfigType
+    :type encoder_config: NetConfigType
     :param head_config: Configuration of the head.
-    :type head_config: Optional[ConfigType]
+    :type head_config: Optional[NetConfigType]
     :param min_latent_dim: Minimum latent dimension.
     :type min_latent_dim: int
     :param max_latent_dim: Maximum latent dimension.
     :type max_latent_dim: int
-    :param n_agents: Number of agents.
-    :type n_agents: Optional[int]
     :param latent_dim: Latent dimension.
     :type latent_dim: int
     :param simba: Whether to use the SimBa architecture for training the network.
@@ -38,24 +36,26 @@ class ValueNetwork(EvolvableNetwork):
     :type recurrent: bool
     :param device: Device to run the network on.
     :type device: str
+    :param random_seed: Random seed to use for the network. Defaults to None.
+    :type random_seed: Optional[int]
     """
 
     def __init__(
         self,
         observation_space: spaces.Space,
         encoder_cls: Optional[Union[str, Type[EvolvableModule]]] = None,
-        encoder_config: Optional[ConfigType] = None,
-        head_config: Optional[ConfigType] = None,
+        encoder_config: Optional[NetConfigType] = None,
+        head_config: Optional[NetConfigType] = None,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        n_agents: Optional[int] = None,
         latent_dim: int = 32,
         simba: bool = False,
         recurrent: bool = False,
         device: str = "cpu",
+        random_seed: Optional[int] = None,
         encoder_name: str = "encoder",
+        **kwargs,
     ):
-
         super().__init__(
             observation_space,
             encoder_cls=encoder_cls,
@@ -63,13 +63,18 @@ class ValueNetwork(EvolvableNetwork):
             action_space=None,
             min_latent_dim=min_latent_dim,
             max_latent_dim=max_latent_dim,
-            n_agents=n_agents,
             latent_dim=latent_dim,
             simba=simba,
             recurrent=recurrent,
             device=device,
+            random_seed=random_seed,
             encoder_name=encoder_name,
         )
+
+        for key, value in kwargs.items():
+            print(
+                f"an extra argument has been passed and will be ignored: {key} = {value}"
+            )
 
         if head_config is None:
             head_config = asdict(MlpNetConfig(hidden_size=[16], output_activation=None))
@@ -85,11 +90,11 @@ class ValueNetwork(EvolvableNetwork):
         """
         return self.head_net.get_output_dense()
 
-    def build_network_head(self, net_config: Optional[ConfigType] = None) -> None:
+    def build_network_head(self, net_config: NetConfigType) -> None:
         """Builds the head of the network.
 
         :param net_config: Configuration of the head.
-        :type net_config: Optional[ConfigType]
+        :type net_config: NetConfigType
         """
         self.head_net = self.create_mlp(
             num_inputs=self.latent_dim,
@@ -114,6 +119,31 @@ class ValueNetwork(EvolvableNetwork):
         else:
             latent = self.extract_features(x)
             return self.head_net(latent)
+
+    def sequence_forward(
+        self, obs_seq: TorchObsType, hidden_state: Optional[TorchObsType] = None
+    ) -> Tuple[torch.Tensor, Optional[TorchObsType]]:
+        """Forward pass for a sequence of observations."""
+        if not self.recurrent:
+            raise ValueError(
+                "sequence_forward is only supported for recurrent networks."
+            )
+
+        features_seq, next_hidden = self.extract_features(
+            obs_seq, hidden_state=hidden_state
+        )
+
+        is_dict = isinstance(obs_seq, dict)
+        if is_dict:
+            batch_size, seq_len = next(iter(obs_seq.values())).shape[:2]
+        else:
+            batch_size, seq_len = obs_seq.shape[:2]
+
+        features_flat = features_seq.reshape(batch_size * seq_len, -1)
+        values_flat = self.head_net(features_flat)
+        values = values_flat.reshape(batch_size, seq_len, -1)
+
+        return values, next_hidden
 
     def recreate_network(self) -> None:
         """Recreates the network."""

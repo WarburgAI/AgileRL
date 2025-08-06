@@ -6,7 +6,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 import torch
 from torch.optim import Optimizer
 
-from agilerl.protocols import EvolvableAlgorithm, EvolvableModule
+from agilerl.protocols import EvolvableAlgorithm
+from agilerl.typing import NetworkType
+from agilerl.utils.llm_utils import DummyOptimizer
 
 
 @dataclass
@@ -16,20 +18,20 @@ class NetworkConfig:
 
     :param name: The name of the attribute where the network is stored.
     :type name: str
-    :param eval: Whether the network is an evaluation network. This implies
+    :param eval_network: Whether the network is an evaluation network. This implies
     that the network is optimized during training. Default is False.
 
-    :type eval: bool
+    :type eval_network: bool
     :param optimizer: The name of the optimizer that updates the network.
     :type optimizer: Optional[str]
     """
 
     name: str
-    eval: bool = field(default=False)
+    eval_network: bool = field(default=False)
     optimizer: Optional[str] = field(default=None)
 
     def __post_init__(self):
-        if self.eval and self.optimizer is None:
+        if self.eval_network and self.optimizer is None:
             raise ValueError(
                 "Evaluation network must have an optimizer associated with it."
             )
@@ -46,6 +48,8 @@ class OptimizerConfig:
     :type name: str
     :param networks: The list of network attribute names that the optimizer will update.
     :type networks: List[str]
+    :param lr: The learning rate of the optimizer.
+    :type lr: str
     :param optimizer_cls: The optimizer class to be used.
     :type optimizer_cls: Type[Optimizer]
     :param optimizer_kwargs: The keyword arguments to be passed to the optimizer.
@@ -57,23 +61,24 @@ class OptimizerConfig:
     lr: str
     optimizer_cls: Union[Type[Optimizer], List[Type[Optimizer]]]
     optimizer_kwargs: Union[Dict[str, Any], List[Dict[str, Any]]]
-    multiagent: bool = field(default=False)
 
     def __post_init__(self):
         # Save optimizer_cls as string for serialization
-        if isinstance(self.optimizer_cls, list):
-            self.optimizer_cls = [cls.__name__ for cls in self.optimizer_cls]
+        if isinstance(self.optimizer_cls, dict):
+            self.optimizer_cls = {
+                agent_id: cls.__name__ for agent_id, cls in self.optimizer_cls.items()
+            }
         else:
             self.optimizer_cls = self.optimizer_cls.__name__
 
     def __eq__(self, other: "OptimizerConfig") -> bool:
         return self.name == other.name and self.networks == other.networks
 
-    def get_optimizer_cls(self) -> Union[Optimizer, List[Optimizer]]:
+    def get_optimizer_cls(self) -> Union[Type[Optimizer], Dict[str, Type[Optimizer]]]:
         """Get the optimizer object/s from the stored configuration.
 
         :return: The optimizer object/s from the stored configuration.
-        :rtype: Union[Optimizer, List[Optimizer]]
+        :rtype: Union[Optimizer, dict[str, Optimizer]]
         """
         name_to_cls = {
             "Adam": torch.optim.Adam,
@@ -86,9 +91,13 @@ class OptimizerConfig:
             "ASGD": torch.optim.ASGD,
             "LBFGS": torch.optim.LBFGS,
             "Rprop": torch.optim.Rprop,
+            "DummyOptimizer": DummyOptimizer,
         }
-        if isinstance(self.optimizer_cls, list):
-            return [name_to_cls[cls_name] for cls_name in self.optimizer_cls]
+        if isinstance(self.optimizer_cls, dict):
+            return {
+                agent_id: name_to_cls[cls_name]
+                for agent_id, cls_name in self.optimizer_cls.items()
+            }
 
         return name_to_cls[self.optimizer_cls]
 
@@ -195,7 +204,7 @@ class HyperparameterConfig:
         """Sample a hyperparameter from the configuration.
 
         :return: The name of the hyperparameter and its configuration.
-        :rtype: Tuple[str, RLHyperparameter]
+        :rtype: Tuple[str, RLParameter]
         """
         key = torch.randperm(len(self.config))[0]
         return list(self.config.keys())[key], list(self.config.values())[key]
@@ -205,65 +214,59 @@ class HyperparameterConfig:
 class NetworkGroup:
     """Dataclass for storing a group of networks. This consists of an evaluation network (i.e.
     a network that is optimized during training) and, optionally, some other networks that
-    share parameters with the evaluation network (e.g. the target network in DQN).
+    share parameters with the evaluation network (e.g. the target network in DQN). If the
+    networks are passed as an agilerl.modules.base.ModuleDict, we assume that the networks
+    are part of a multiagent setting.
 
-    :param eval: The evaluation network.
-    :type eval: str
-    :param shared: The list of shared networks.
-    :type shared: str, List[str]
+    :param eval_network: The evaluation network.
+    :type eval_network: NetworkType
+    :param shared_networks: The list of shared networks.
+    :type shared_networks: Optional[NetworkType]
     :param policy: Whether the network is a policy (e.g. the network used to get the actions
         of the agent). There must be one network group in an algorithm which sets this to True.
         Default is False.
     :type policy: bool
-    :param multiagent: Whether the network group is used in a multiagent setting. Default is False.
-    :type multiagent: bool
     """
 
-    eval: EvolvableModule
-    shared: Optional[Union[EvolvableModule, List[EvolvableModule]]] = field(
-        default=None
-    )
+    eval_network: NetworkType
+    shared_networks: Optional[NetworkType] = field(default=None)
     policy: bool = field(default=False)
-    multiagent: bool = field(default=False)
 
     def __post_init__(self):
-        if self.multiagent:
-            assert isinstance(self.eval, list) and isinstance(
-                self.eval[0], EvolvableModule
-            ), (
-                "Multiagent algorithms should specify a list of EvolvableModule objects "
-                "for the evaluation argument in the network group.",
-            )
-
-            if self.shared is not None:
-                assert isinstance(self.shared, list), (
-                    "Multiagent algorithms should specify a list of EvolvableModule objects "
-                    "for the shared argument in the network group.",
+        # Check that the shared networks are of the same type as the eval network
+        if self.shared_networks is not None:
+            eval_cls = type(self.eval_network)
+            if isinstance(self.shared_networks, list):
+                assert all(isinstance(net, eval_cls) for net in self.shared_networks), (
+                    f"Expected a list of {eval_cls.__name__} objects for the "
+                    f"shared argument in the network group. Found {type(self.shared_networks[0])}."
+                )
+            else:
+                assert isinstance(self.shared_networks, eval_cls), (
+                    f"Expected a {eval_cls.__name__} object for the "
+                    f"shared argument in the network group. Found {type(self.shared_networks[0])}."
                 )
 
         # Identify the names of the attributes where the networks are stored
         container = self._infer_parent_container()
-        eval = self.eval if isinstance(self.eval, list) else [self.eval]
-        self.eval = self._infer_attribute_names(container, eval)[0]
-        if self.shared is not None:
-            shared = self.shared if isinstance(self.shared, list) else [self.shared]
+        self.eval_network = self._infer_attribute_names(container, self.eval_network)[0]
+        if self.shared_networks is not None:
+            shared = (
+                self.shared_networks
+                if isinstance(self.shared_networks, list)
+                else [self.shared_networks]
+            )
+            self.shared_networks = self._infer_attribute_names(container, shared)
 
-            if self.multiagent and isinstance(shared[0], list):
-                self.shared = [
-                    self._infer_attribute_names(container, shared) for shared in shared
-                ]
-            else:
-                assert isinstance(
-                    shared[0], EvolvableModule
-                ), "Expected a list of EvolvableModule objects for the shared argument in the network group."
-
-                self.shared = self._infer_attribute_names(container, shared)
+    def __hash__(self) -> int:
+        return hash((self.eval_network, self.shared_networks, self.policy))
 
     def _infer_parent_container(self) -> EvolvableAlgorithm:
         """
         Infer the parent container dynamically using the stack frame.
 
         :return: The parent container object
+        :rtype: EvolvableAlgorithm
         """
         # NOTE: Here the assumption is that NetworkGroup is used inside the __init__
         # method of the implemented algorithm, such that we can access the defined locals
@@ -272,18 +275,25 @@ class NetworkGroup:
         return current_frame.f_back.f_back.f_back.f_locals["self"]
 
     def _infer_attribute_names(
-        self, container: object, objects: List[object]
+        self, container: object, objects: Union[object, List[object]]
     ) -> List[str]:
         """
         Infer attribute names of the networks being optimized.
 
+        :param container: The container object to inspect.
+        :type container: object
+        :param objects: The objects to match.
+        :type objects: Union[object, List[object]]
+
         :return: List of attribute names for the networks
+        :rtype: List[str]
         """
 
         def _match_condition(attr_value: Any) -> bool:
-            if not self.multiagent:
-                return any(id(attr_value) == id(net) for net in objects)
-            return id(attr_value) == id(objects)
+            if isinstance(objects, list):
+                return any(id(attr_value) == id(obj) for obj in objects)
+            else:
+                return id(attr_value) == id(objects)
 
         return [
             attr_name
@@ -293,15 +303,17 @@ class NetworkGroup:
 
 
 def make_network_group(
-    eval: str, shared: Optional[Union[str, List[str]]], policy: bool = False
+    eval_network: str,
+    shared_networks: Optional[Union[str, List[str]]],
+    policy: bool = False,
 ) -> NetworkGroup:
     """Make a network group from a given eval network and, optionally, some network/s that
     share parameters with the eval network.
 
-    :param eval: The evaluation network.
-    :type eval: str
-    :param shared: The list of shared networks.
-    :type shared: str, List[str]
+    :param eval_network: The evaluation network.
+    :type eval_network: str
+    :param shared_networks: The list of shared networks.
+    :type shared_networks: Optional[Union[str, List[str]]]
     :param policy: Whether the network is a policy (e.g. the network used to get the actions
     of the agent). There must be one network group in an algorithm which sets this to True.
     Default is False.
@@ -310,19 +322,21 @@ def make_network_group(
     :return: NetworkGroup object with the passed configuration.
     :rtype: NetworkGroup
     """
-    return NetworkGroup(eval=eval, shared=shared, policy=policy)
+    return NetworkGroup(
+        eval_network=eval_network, shared_networks=shared_networks, policy=policy
+    )
 
 
 @dataclass
 class MutationRegistry:
     """Registry to keep track of the components of an algorithms that may evolve during training
-    in a structured way to be interpreted by a `Mutations` object when performing evolutionary
-    hyperparameter optimization. This includes:
+    in a structured way to be interpreted by a :class:`Mutations <agilerl.hpo.mutations.Mutations>` object
+    when performing evolutionary hyperparameter optimization. This includes:
 
     1. The hyperparameter configuration of the algorithm.
     2. The network groups of the algorithm.
     3. The optimizers of the algorithm.
-    4. The mutation hooks of the algorithm (i.e. functions that are called when a mutation is performed).
+    4. The mutation hooks of the algorithm (i.e. functions that are called after a mutation is performed).
 
     :param hp_config: The hyperparameter configuration of the algorithm.
     :type hp_config: HyperparameterConfig
@@ -340,7 +354,10 @@ class MutationRegistry:
 
     def __repr__(self) -> str:
         groups_str = "\n".join(
-            [f"Eval: '{group.eval}', Shared: {group.shared}" for group in self.groups]
+            [
+                f"Eval: '{group.eval_network}', Shared: {group.shared_networks}"
+                for group in self.groups
+            ]
         )
         optimizers_str = "\n".join(
             [
@@ -371,27 +388,35 @@ class MutationRegistry:
         """
         return {config.name: config.networks for config in self.optimizers}
 
-    @property
-    def policy(self) -> Optional[str]:
+    def policy(self, return_group: bool = False) -> Optional[Union[str, NetworkGroup]]:
         """Get the name of the policy network in the registry.
 
+        :param return_group: Whether to return the network group instead of just the name.
+        :type return_group: bool
+
         :return: The name of the policy network in the registry.
-        :rtype: Optional[str]
+        :rtype: Optional[Union[str, NetworkGroup]]
         """
         for group in self.groups:
             if group.policy:
-                return group.eval
-        return None
+                return group.eval_network if not return_group else group
+        return
 
     def all_registered(self) -> List[str]:
-        """Returns all of the members in the registry."""
-        all_registered = {group.eval for group in self.groups}
+        """Returns all of the members in the registry.
+
+        :return: A list of all the members in the registry.
+        :rtype: List[str]
+        """
+        all_registered = {group.eval_network for group in self.groups}
         all_registered.update(
             shared
             for group in self.groups
-            if group.shared is not None
+            if group.shared_networks is not None
             for shared in (
-                group.shared if isinstance(group.shared, list) else [group.shared]
+                group.shared_networks
+                if isinstance(group.shared_networks, list)
+                else [group.shared_networks]
             )
         )
         all_registered.update(opt.name for opt in self.optimizers)
@@ -400,7 +425,8 @@ class MutationRegistry:
     def networks(self) -> List[NetworkConfig]:
         """Get a list of network configurations in the registry.
 
-        :return: A list of network configurations in the registry.
+        :return: A list of network configurations in the registry. This includes the evaluation
+        and shared networks.
         :rtype: List[NetworkConfig]
         """
         # Match with optimizers (only eval networks can have optimizers by definition)
@@ -412,16 +438,20 @@ class MutationRegistry:
         # Fetch evaluation and shared networks
         eval_networks = [
             NetworkConfig(
-                name=group.eval, eval=True, optimizer=optimizer_eval.get(group.eval)
+                name=group.eval_network,
+                eval_network=True,
+                optimizer=optimizer_eval.get(group.eval_network),
             )
             for group in self.groups
         ]
         shared_networks = [
-            NetworkConfig(name=shared, eval=False)
+            NetworkConfig(name=shared, eval_network=False)
             for group in self.groups
-            if group.shared is not None
+            if group.shared_networks is not None
             for shared in (
-                group.shared if isinstance(group.shared, list) else [group.shared]
+                group.shared_networks
+                if isinstance(group.shared_networks, list)
+                else [group.shared_networks]
             )
         ]
 
@@ -430,21 +460,22 @@ class MutationRegistry:
     def register_group(self, group: NetworkGroup) -> None:
         """Register a network configuration in the registry.
 
-        :param config: The network configuration to be registered.
-        :type config: NetworkConfig
+        :param group: The network group to be registered.
+        :type group: NetworkGroup
         """
         self.groups.append(group)
 
     def register_optimizer(self, optimizer: OptimizerConfig) -> None:
         """Register an optimizer configuration in the registry.
 
-        :param config: The optimizer configuration to be registered.
-        :type config: OptimizerConfig
+        :param optimizer: The optimizer configuration to be registered.
+        :type optimizer: OptimizerConfig
         """
         self.optimizers.append(optimizer)
 
     def register_hook(self, hook: Callable) -> None:
-        """Register a hook in the registry as its name.
+        """Register a hook in the registry as its name. This is used to store the names of the
+        mutation hooks that will be applied after a mutation is performed.
 
         :param hook: The hook to be registered.
         :type hook: Callable

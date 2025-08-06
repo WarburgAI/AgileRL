@@ -6,7 +6,7 @@ from gymnasium import spaces
 from torch.distributions import Bernoulli, Categorical, Distribution, Normal
 
 from agilerl.modules.base import EvolvableModule, EvolvableWrapper
-from agilerl.typing import ArrayOrTensor, ConfigType, DeviceType
+from agilerl.typing import ArrayOrTensor, DeviceType, NetConfigType
 
 DistributionType = Union[Distribution, List[Distribution]]
 
@@ -55,6 +55,10 @@ class DistributionHandler(Protocol):
         """Get the entropy of the action distribution."""
         ...
 
+    def mode(self, distribution: DistributionType) -> torch.Tensor:
+        """Get the mode of the distribution."""
+        ...
+
 
 class NormalHandler:
     """Handler for Normal distributions."""
@@ -88,6 +92,16 @@ class NormalHandler:
         :rtype: torch.Tensor
         """
         return sum_independent_tensor(distribution.entropy())
+
+    def mode(self, distribution: Normal) -> torch.Tensor:
+        """Get the mode of the distribution.
+
+        :param distribution: Distribution to compute mode for.
+        :type distribution: Normal
+        :return: Mode of the action distribution.
+        :rtype: torch.Tensor
+        """
+        return distribution.mean
 
 
 class BernoulliHandler:
@@ -123,6 +137,16 @@ class BernoulliHandler:
         """
         return distribution.entropy().sum(dim=1)
 
+    def mode(self, distribution: Bernoulli) -> torch.Tensor:
+        """Get the mode of the distribution.
+
+        :param distribution: Distribution to compute mode for.
+        :type distribution: Bernoulli
+        :return: Mode of the action distribution.
+        :rtype: torch.Tensor
+        """
+        return distribution.mode
+
 
 class CategoricalHandler:
     """Handler for Categorical distributions."""
@@ -156,6 +180,16 @@ class CategoricalHandler:
         :rtype: torch.Tensor
         """
         return distribution.entropy()
+
+    def mode(self, distribution: Categorical) -> torch.Tensor:
+        """Get the mode of the distribution.
+
+        :param distribution: Distribution to compute mode for.
+        :type distribution: Categorical
+        :return: Mode of the action distribution.
+        :rtype: torch.Tensor
+        """
+        return distribution.mode
 
 
 class MultiCategoricalHandler:
@@ -196,6 +230,16 @@ class MultiCategoricalHandler:
         :rtype: torch.Tensor
         """
         return torch.stack([dist.entropy() for dist in distribution], dim=1).sum(dim=1)
+
+    def mode(self, distribution: List[Categorical]) -> torch.Tensor:
+        """Get the mode of the distribution.
+
+        :param distribution: List of Categorical distributions to compute mode for.
+        :type distribution: List[Categorical]
+        :return: Mode of the action distribution.
+        :rtype: torch.Tensor
+        """
+        return torch.stack([dist.mode for dist in distribution], dim=1)
 
 
 class TorchDistribution:
@@ -294,6 +338,17 @@ class TorchDistribution:
 
         return self._handler.entropy(self.distribution)
 
+    def mode(self) -> torch.Tensor:
+        """Get the mode of the distribution.
+
+        :return: Mode of the distribution.
+        :rtype: torch.Tensor
+        """
+        action = self._handler.mode(self.distribution)
+        if self.squash_output:
+            action = torch.tanh(action)
+        return action
+
 
 class EvolvableDistribution(EvolvableWrapper):
     """Wrapper to output a distribution over an action space for an evolvable module. It provides methods
@@ -344,11 +399,11 @@ class EvolvableDistribution(EvolvableWrapper):
             )
 
     @property
-    def net_config(self) -> ConfigType:
+    def net_config(self) -> NetConfigType:
         """Configuration of the network.
 
         :return: Configuration of the network.
-        :rtype: ConfigType
+        :rtype: NetConfigType
         """
         return self.wrapped.net_config
 
@@ -458,6 +513,7 @@ class EvolvableDistribution(EvolvableWrapper):
         latent: torch.Tensor,
         action_mask: Optional[ArrayOrTensor] = None,
         sample: bool = True,
+        deterministic: bool = False,
     ) -> Union[
         Tuple[torch.Tensor, torch.Tensor, torch.Tensor], Tuple[None, None, torch.Tensor]
     ]:
@@ -467,7 +523,11 @@ class EvolvableDistribution(EvolvableWrapper):
         :type latent: torch.Tensor
         :param action_mask: Mask to apply to the logits. Defaults to None.
         :type action_mask: Optional[ArrayOrTensor]
-        :return: Action and log probability of the action.
+        :param sample: Whether to sample an action from the distribution. Defaults to True.
+        :type sample: bool, optional
+        :param deterministic: Whether to return a deterministic action. Defaults to False.
+        :type deterministic: bool, optional
+        :return: Action, log probability of the action, and entropy of the distribution.
         :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
         logits = self.wrapped(latent)
@@ -485,13 +545,14 @@ class EvolvableDistribution(EvolvableWrapper):
         # Distribution from logits
         self.dist = self.get_distribution(logits)
 
-        # Sample action, compute log probability and entropy
-        if sample:
+        action = None
+        log_prob = None
+
+        if deterministic:
+            action = self.dist.mode()
+        elif sample:
             action = self.dist.sample()
             log_prob = self.dist.log_prob(action)
-        else:
-            action = None
-            log_prob = None
 
         entropy = self.dist.entropy()
         return action, log_prob, entropy
@@ -502,9 +563,12 @@ class EvolvableDistribution(EvolvableWrapper):
         :return: Cloned distribution.
         :rtype: EvolvableDistribution
         """
-        return EvolvableDistribution(
+        clone = EvolvableDistribution(
             action_space=self.action_space,
             network=self.wrapped.clone(),
             action_std_init=self.action_std_init,
+            squash_output=self.squash_output,
             device=self.device,
         )
+        clone.rng = self.rng
+        return clone

@@ -1,10 +1,11 @@
+import os
 from unittest.mock import MagicMock, Mock, patch
 
 import gymnasium as gym
 import numpy as np
 import pytest
 import torch
-from accelerate import Accelerator
+from accelerate import Accelerator, DeepSpeedPlugin
 from gymnasium import spaces
 from pettingzoo.mpe import simple_speaker_listener_v4
 
@@ -12,6 +13,7 @@ from agilerl.algorithms import (
     CQN,
     DDPG,
     DQN,
+    GRPO,
     IPPO,
     MADDPG,
     MATD3,
@@ -152,7 +154,7 @@ def test_create_initial_population_single_agent():
 def test_create_initial_population_multi_agent():
     observation_space = [spaces.Box(0, 1, shape=(4,)) for _ in range(2)]
     action_space = [spaces.Discrete(2) for _ in range(2)]
-    net_config = {"encoder_config": {"hidden_size": [8]}}
+    net_config = {"encoder_config": {"hidden_size": [8], "min_mlp_nodes": 2}}
     population_size = 4
     device = "cpu"
     accelerator = None
@@ -318,6 +320,7 @@ def test_save_with_accelerator():
     save_llm_checkpoint(agent, None)
     agent.actor.save_pretrained.assert_called_once_with("./saved_checkpoints/grpo")
     agent.accelerator.wait_for_everyone.assert_called()
+    os.rmdir("saved_checkpoints/grpo")
 
 
 def test_save_without_accelerator():
@@ -328,6 +331,7 @@ def test_save_without_accelerator():
     agent.accelerator = None
     save_llm_checkpoint(agent, None)
     agent.actor.save_pretrained.assert_called_once_with("./saved_checkpoints/grpo")
+    os.rmdir("saved_checkpoints/grpo")
 
 
 def test_gather_tensor_with_tensor_input():
@@ -459,12 +463,20 @@ def test_consolidate_mutations_warning_if_not_llm_algorithm():
 
 
 def test_consolidate_mutations():
-    population = [MagicMock(spec=LLMAlgorithm) for _ in range(3)]
+    population = [MagicMock(spec=GRPO) for _ in range(3)]
     for agent in population:
         agent.mut = "lr"
         agent.lr = 0.01
         agent.optimizer = Mock()
         agent.optimizer.param_groups = [{"lr": 0.01}]
+        agent.cosine_lr_schedule_config = {"warmup_steps": 0, "total_steps": 100}
+        agent.accelerator = MagicMock(spec=Accelerator)
+        agent.accelerator.is_main_process = True
+        agent.accelerator.wait_for_everyone = Mock()
+        agent.accelerator.state = MagicMock()
+        agent.accelerator.state.deepspeed_plugin = MagicMock(spec=DeepSpeedPlugin)
+        agent.accelerator.state.deepspeed_plugin.deepspeed_config = {}
+        agent.actor = MagicMock()
     consolidate_mutations(population)
     for agent in population:
         assert agent.mut == "lr"

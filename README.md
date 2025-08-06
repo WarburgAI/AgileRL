@@ -9,10 +9,9 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Documentation Status](https://readthedocs.org/projects/agilerl/badge/?version=latest)](https://docs.agilerl.com/en/latest/?badge=latest)
 [![Downloads](https://static.pepy.tech/badge/agilerl)](https://pypi.python.org/pypi/agilerl/)
-[![Discord](https://dcbadge.vercel.app/api/server/eB8HyTA2ux?style=flat)](https://discord.gg/eB8HyTA2ux)
+[![Discord](https://dcbadge.limes.pink/api/server/https://discord.gg/eB8HyTA2ux?style=flat)](https://discord.gg/eB8HyTA2ux)
 [![Arena](./.github/badges/arena-github-badge.svg)](https://arena.agilerl.com)
 <br>
-<h3><i>✨ <b>AgileRL 2.0 is here! Check out the latest powerful <a href=https://docs.agilerl.com/en/latest/get_started/agilerl2changes.html>updates</a>✨ </b></i></h3>
 <h3><i>🚀 <b>Train super-fast for free on <a href="https://arena.agilerl.com">Arena</a>, the RLOps platform from AgileRL 🚀</b></i></h3>
 </div>
 <br>
@@ -32,7 +31,7 @@ We are constantly adding more algorithms and features. AgileRL already includes 
   * [Get Started](#get-started)
   * [Benchmarks](#benchmarks)
   * [Tutorials](#tutorials)
-  * [Algorithms implemented](#evolvable-algorithms-implemented-more-coming-soon)
+  * [Algorithms implemented](#evolvable-algorithms-more-coming-soon)
   * [Train an agent](#train-an-agent-to-beat-a-gym-environment)
   * [Citing AgileRL](#citing-agilerl)
 
@@ -48,6 +47,12 @@ Or install in development mode:
 ```bash
 git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
 pip install -e .
+```
+
+To install the ``nightly`` version of AgileRL with the latest features, use:
+
+```bash
+pip install git+https://github.com/AgileRL/AgileRL.git@nightly
 ```
 
 ## Benchmarks
@@ -73,7 +78,7 @@ We are constantly updating our tutorials to showcase the latest features of Agil
 
 | Tutorial Type | Description | Tutorials |
 |---------------|-------------|-----------|
-| [Single-agent tasks](https://docs.agilerl.com/en/latest/tutorials/gymnasium/index.html) | Guides for training both on and off-policy agents to beat a variety of Gymnasium environments. | [PPO - Acrobot](https://docs.agilerl.com/en/latest/tutorials/gymnasium/agilerl_ppo_tutorial.html) <br> [TD3 - Lunar Lander](https://docs.agilerl.com/en/latest/tutorials/gymnasium/agilerl_td3_tutorial.html) <br> [Rainbow DQN - CartPole](https://docs.agilerl.com/en/latest/tutorials/gymnasium/agilerl_rainbow_dqn_tutorial.html) |
+| [Single-agent tasks](https://docs.agilerl.com/en/latest/tutorials/gymnasium/index.html) | Guides for training both on and off-policy agents to beat a variety of Gymnasium environments. | [PPO - Acrobot](https://docs.agilerl.com/en/latest/tutorials/gymnasium/agilerl_ppo_tutorial.html) <br> [TD3 - Lunar Lander](https://docs.agilerl.com/en/latest/tutorials/gymnasium/agilerl_td3_tutorial.html) <br> [Rainbow DQN - CartPole](https://docs.agilerl.com/en/latest/tutorials/gymnasium/agilerl_rainbow_dqn_tutorial.html) <br> [Recurrent PPO - Masked Pendulum](https://docs.agilerl.com/en/latest/tutorials/gymnasium/agilerl_recurrent_ppo_tutorial.html)  |
 | [Multi-agent tasks](https://docs.agilerl.com/en/latest/tutorials/pettingzoo/index.html) | Use of PettingZoo environments such as training DQN to play Connect Four with curriculum learning and self-play, and for multi-agent tasks in MPE environments. | [DQN - Connect Four](https://docs.agilerl.com/en/latest/tutorials/pettingzoo/dqn.html) <br> [MADDPG - Space Invaders](https://docs.agilerl.com/en/latest/tutorials/pettingzoo/maddpg.html) <br> [MATD3 - Speaker Listener](https://docs.agilerl.com/en/latest/tutorials/pettingzoo/matd3.html) |
 | [Hierarchical curriculum learning](https://docs.agilerl.com/en/latest/tutorials/skills/index.html) | Shows how to teach agents Skills and combine them to achieve an end goal. | [PPO - Lunar Lander](https://docs.agilerl.com/en/latest/tutorials/skills/index.html) |
 | [Contextual multi-arm bandits](https://docs.agilerl.com/en/latest/tutorials/bandits/index.html) | Learn to make the correct decision in environments that only have one timestep. | [NeuralUCB - Iris Dataset](https://docs.agilerl.com/en/latest/tutorials/bandits/agilerl_neural_ucb_tutorial.html) <br> [NeuralTS - PenDigits](https://docs.agilerl.com/en/latest/tutorials/bandits/agilerl_neural_ts_tutorial.html) |
@@ -94,7 +99,7 @@ We are constantly updating our tutorials to showcase the latest features of Agil
 
   | RL         | Algorithm |
   | ---------- | --------- |
-  | [Multi-agent](https://docs.agilerl.com/en/latest/multi_agent_training/index.html) | [Multi-Agent Deep Deterministic Policy Gradient (MADDPG)](https://docs.agilerl.com/en/latest/api/algorithms/maddpg.html) <br> [Multi-Agent Twin-Delayed Deep Deterministic Policy Gradient (MATD3)](https://docs.agilerl.com/en/latest/api/algorithms/matd3.html) |
+  | [Multi-agent](https://docs.agilerl.com/en/latest/multi_agent_training/index.html) | [Multi-Agent Deep Deterministic Policy Gradient (MADDPG)](https://docs.agilerl.com/en/latest/api/algorithms/maddpg.html) <br> [Multi-Agent Twin-Delayed Deep Deterministic Policy Gradient (MATD3)](https://docs.agilerl.com/en/latest/api/algorithms/matd3.html)  <br> [Independent Proximal Policy Optimization (IPPO)](https://docs.agilerl.com/en/latest/api/algorithms/ippo.html)|
 
   ### Contextual multi-armed bandit algorithms
 
@@ -102,9 +107,20 @@ We are constantly updating our tutorials to showcase the latest features of Agil
   | ---------- | --------- |
   | [Bandits](https://docs.agilerl.com/en/latest/bandits/index.html) | [Neural Contextual Bandits with UCB-based Exploration (NeuralUCB)](https://docs.agilerl.com/en/latest/api/algorithms/neural_ucb.html) <br> [Neural Contextual Bandits with Thompson Sampling (NeuralTS)](https://docs.agilerl.com/en/latest/api/algorithms/neural_ts.html) |
 
-## Train an agent to beat a Gym environment
+  ### LLM Reasoning Algorithms
+
+  | RL         | Algorithm |
+  | ---------- | --------- |
+  | [On-Policy](https://docs.agilerl.com/en/latest/llm_finetuning/index.html) | [Group Relative Policy Optimization (GRPO)](https://docs.agilerl.com/en/latest/api/algorithms/grpo.html)
+
+
+## Train an Agent to Beat a Gym Environment
 
 Before starting training, there are some meta-hyperparameters and settings that must be set. These are defined in <code>INIT_HP</code>, for general parameters, and <code>MUTATION_PARAMS</code>, which define the evolutionary probabilities, and <code>NET_CONFIG</code>, which defines the network architecture. For example:
+
+<details>
+<summary>Basic Hyperparameters</summary>
+
 ```python
 INIT_HP = {
     'ENV_NAME': 'LunarLander-v3',   # Gym environment name
@@ -129,6 +145,12 @@ INIT_HP = {
     'WANDB': True,                  # Log with Weights and Biases
 }
 ```
+
+</details>
+
+<details>
+<summary>Mutation Hyperparameters</summary>
+
 ```python
 MUTATION_PARAMS = {
     # Relative probabilities
@@ -142,21 +164,34 @@ MUTATION_PARAMS = {
     'RAND_SEED': 1,                             # Random seed
 }
 ```
+
+</details>
+
+<details>
+<summary>Basic Network Configuration</summary>
+
 ```python
 NET_CONFIG = {
     'latent_dim': 16
-
     'encoder_config': {
       'hidden_size': [32]     # Observation encoder configuration
     }
-
     'head_config': {
       'hidden_size': [32]     # Network head configuration
     }
 
 }
 ```
+
+</details>
+
+### Creating a Population of Agents
+
 First, use <code>utils.utils.create_population</code> to create a list of agents - our population that will evolve and mutate to the optimal hyperparameters.
+
+<details>
+<summary>Population Creation Example</summary>
+
 ```python
 import torch
 from agilerl.utils.utils import (
@@ -186,7 +221,16 @@ agent_pop = create_population(
     device=device
 )
 ```
+
+</details>
+
+### Initializing Evolutionary HPO
+
 Next, create the tournament, mutations and experience replay buffer objects that allow agents to share memory and efficiently perform evolutionary HPO.
+
+<details>
+<summary>Mutations and Tournament Seelection Example</summary>
+
 ```python
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.tournament import TournamentSelection
@@ -216,7 +260,14 @@ mutations = Mutations(
     device=device,
 )
 ```
+
+</details>
+
+### Train A Population of Agents
+
 The easiest training loop implementation is to use our <code>train_off_policy()</code> function. It requires the <code>agent</code> have methods <code>get_action()</code> and <code>learn().</code>
+
+
 ```python
 from agilerl.training.train_off_policy import train_off_policy
 

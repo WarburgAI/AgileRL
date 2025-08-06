@@ -9,7 +9,9 @@ PopulationType = List[EvolvableAlgorithm]
 
 
 class TournamentSelection:
-    """The tournament selection class.
+    """The tournament selection class. Calling :func:`TournamentSelection.select() <agilerl.hpo.tournament.TournamentSelection.select>`
+    on a population of agents will return a cloned population containing the best performing agent as well as the new generation of agents
+    based on their fitness scores.
 
     :param tournament_size: Tournament selection size
     :type tournament_size: int
@@ -27,6 +29,7 @@ class TournamentSelection:
         elitism: bool,
         population_size: int,
         eval_loop: int,
+        agent_run_manager=None,
     ) -> None:
         assert tournament_size > 0, "Tournament size must be greater than zero."
         assert isinstance(elitism, bool), "Elitism must be boolean value True or False."
@@ -37,10 +40,11 @@ class TournamentSelection:
         self.population_size = population_size
         self.eval_loop = eval_loop
         self.language_model = None
+        self.agent_run_manager = agent_run_manager
 
     def _tournament(self, fitness_values: List[float]) -> int:
         """
-        Perform a tournament selection.
+        Perform tournament selection given a list of fitness values.
 
         :param fitness_values: List of fitness values
         :type fitness_values: list[float]
@@ -56,7 +60,7 @@ class TournamentSelection:
         self, population: PopulationType
     ) -> Tuple[EvolvableAlgorithm, np.ndarray, int]:
         """
-        Perform elitism selection.
+        Perform elitism selection given a population of agents.
 
         :param population: Population of agents
         :type population: PopulationType
@@ -71,50 +75,108 @@ class TournamentSelection:
         return elite, rank, max_id
 
     def select(
-        self, population: PopulationType
-    ) -> Tuple[EvolvableAlgorithm, PopulationType]:
-        if self.language_model is None:
-            self.language_model = population[0].algo == "GRPO"
-        return (
-            self._select_llm_agents(population)
-            if self.language_model
-            else self._select_standard_agents(population)
-        )
-
-    def _select_standard_agents(
-        self, population: PopulationType
+        self, population: PopulationType, current_step: int = 0
     ) -> Tuple[EvolvableAlgorithm, PopulationType]:
         """
-        Returns best agent and new population of agents following tournament selection.
+        Select the best agent and new population of agents following tournament selection.
 
         :param population: Population of agents
         :type population: PopulationType
+        :param current_step: Current evolution step for logging
+        :type current_step: int
+        :return: Elite agent and new population
+        :rtype: tuple[EvolvableAlgorithm, PopulationType]
+        """
+        if self.language_model is None:
+            self.language_model = population[0].algo == "GRPO"
+
+        return (
+            self._select_llm_agents(population, current_step)
+            if self.language_model
+            else self._select_standard_agents(population, current_step)
+        )
+
+    def _select_standard_agents(
+        self, population: PopulationType, current_step: int = 0
+    ) -> Tuple[EvolvableAlgorithm, PopulationType]:
+        """
+        Returns best agent and new population of agents following tournament selection. Used for
+        a population of :class:`EvolvableAlgorithm <agilerl.algorithms.core.RLAlgorithm>` or
+        :class:`MultiAgentRLAlgorithm <agilerl.algorithms.core.MultiAgentRLAlgorithm>` agents.
+
+        :param population: Population of agents
+        :type population: PopulationType
+        :param current_step: Current evolution step for logging
+        :type current_step: int
         :return: Elite agent and new population
         :rtype: tuple[EvolvableAlgorithm, PopulationType]
         """
         elite, rank, max_id = self._elitism(population)
+
+        # Log tournament results if run manager available
+        if self.agent_run_manager:
+            tournament_metrics = {
+                "tournament_rank": rank.tolist(),
+                "elite_fitness": (
+                    np.mean(elite.fitness[-self.eval_loop :]) if elite.fitness else 0
+                ),
+                "selection_pressure": self.tournament_size / len(population),
+            }
+
+            # Log to elite's run
+            if hasattr(elite, "original_id"):
+                self.agent_run_manager.log_agent_metrics(
+                    elite.original_id,
+                    {**tournament_metrics, "selected_as": "elite"},
+                    current_step,
+                )
+
         new_population = []
         if self.elitism:  # keep top agent in population
-            new_population.append(elite.clone(wrap=False))
+            elite_clone = elite.clone(wrap=False)
+            elite_clone.original_id = getattr(elite, "original_id", 0)
+            new_population.append(elite_clone)
             selection_size = self.population_size - 1
         else:
             selection_size = self.population_size
-        # select parents of next gen using tournament selection
+
+        # Select parents of next gen using tournament selection
         for idx in range(selection_size):
             max_id += 1
-            actor_parent = population[self._tournament(rank)]
+            parent_idx = self._tournament(rank)
+            actor_parent = population[parent_idx]
             new_individual = actor_parent.clone(max_id, wrap=False)
+
+            # Track parent relationship for internal logging
+            # Note: Neptune forking provides lineage tracking in the UI
+            new_individual.parent_id = getattr(actor_parent, "original_id", parent_idx)
+            new_individual.original_id = (
+                max_id  # Unique ID for agent run management and logging
+            )
+
+            # Log selection
+            if self.agent_run_manager and hasattr(actor_parent, "original_id"):
+                self.agent_run_manager.log_agent_metrics(
+                    actor_parent.original_id,
+                    {"selected_as": "parent", "offspring_count": 1},
+                    current_step,
+                )
+
             new_population.append(new_individual)
+
         return elite, new_population
 
     def _select_llm_agents(
-        self, population: PopulationType
+        self, population: PopulationType, current_step: int = 0
     ) -> Tuple[EvolvableAlgorithm, PopulationType]:
         """
-        Returns best agent and new population of agents following tournament selection.
+        Returns best agent and new population of agents following tournament selection. Used for
+        a population of :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
 
         :param population: Population of agents
         :type population: PopulationType
+        :param current_step: Current evolution step for logging
+        :type current_step: int
         :return: Elite agent and new population
         :rtype: tuple[EvolvableAlgorithm, PopulationType]
         """
@@ -140,6 +202,7 @@ class TournamentSelection:
                 new_population_idxs.append(
                     (actor_parent_idx, max_id, False)
                 )  # (old_idx_to_clone, new_labelled_idx, is_elite)
+
             # Isolate any agents that are not in the new population to be deleted
             unwanted_agents = set(old_population_idxs) - {
                 idx for idx, *_ in new_population_idxs

@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
 from gymnasium import spaces
 
 from agilerl.modules.base import EvolvableModule
@@ -211,7 +212,6 @@ class ICMFeatureEncoder(EvolvableModule):
         obs: torch.Tensor,
         hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
-
         if self.arch == "mlp":
             obs = obs.reshape(obs.size(0), -1)
         elif self.arch == "cnn":
@@ -228,6 +228,10 @@ class ICMFeatureEncoder(EvolvableModule):
                     obs.dim() == 4 and obs.size(3) == self.input_shape[0]
                 ):  # B,H,W,C -> B,C,H,W
                     obs = obs.permute(0, 3, 1, 2)
+                elif (
+                    obs.dim() == 3 and obs.size(2) == self.input_shape[0]
+                ):  # B,H,W,C -> B,C,H,W (when C=1,3,4)
+                    obs = obs.permute(0, 2, 0, 1)
 
         features = self.base_encoder(obs)
         next_hidden_state = None
@@ -265,6 +269,27 @@ class ICMFeatureEncoder(EvolvableModule):
         clone = type(self)(**self.get_init_dict())
         clone.load_state_dict(self.state_dict())
         return clone
+
+    def initialize_hidden_state(
+        self, batch_size: int = 1, device: Optional[Union[torch.device, str]] = None
+    ) -> Optional[Dict[str, torch.Tensor]]:
+        """Initialize hidden state for the recurrent encoder.
+
+        :param batch_size: Batch size for the hidden state
+        :type batch_size: int
+        :param device: Device to place the hidden state on
+        :type device: Optional[Union[torch.device, str]]
+        :return: Initial hidden state dictionary
+        :rtype: Optional[Dict[str, torch.Tensor]]
+        """
+        if not self.is_recurrent or not self.lstm:
+            return None
+
+        device = device or self.device
+        h_init, c_init = self.lstm.init_hidden(batch_size)
+
+        # Return as dictionary with keys 'h' and 'c' for LSTM
+        return {"h": h_init.to(device), "c": c_init.to(device)}
 
 
 class ICMInverseModel(EvolvableMLP):
@@ -385,9 +410,9 @@ def actions_to_one_hot(actions, action_space):
         return torch.cat(one_hots, dim=1)
     elif isinstance(action_space, spaces.Box):
         # For continuous actions, just return the actions as float tensors
-        # Optionally normalize to [0, 1] range if action space has bounds
+        # Optionally normalize to [0, 1] range
         actions_float = actions.float()
-        if action_space.is_bounded():
+        if hasattr(action_space, "is_bounded") and action_space.is_bounded():
             # Normalize to [0, 1] range
             low = torch.tensor(
                 action_space.low, device=actions.device, dtype=torch.float32
@@ -396,6 +421,16 @@ def actions_to_one_hot(actions, action_space):
                 action_space.high, device=actions.device, dtype=torch.float32
             )
             actions_float = (actions_float - low) / (high - low)
+        elif hasattr(action_space, "low") and hasattr(action_space, "high"):
+            # Handle cases where bounds exist but is_bounded() is not available
+            low = torch.tensor(
+                action_space.low, device=actions.device, dtype=torch.float32
+            )
+            high = torch.tensor(
+                action_space.high, device=actions.device, dtype=torch.float32
+            )
+            if not torch.isinf(low).any() and not torch.isinf(high).any():
+                actions_float = (actions_float - low) / (high - low)
         return actions_float
     else:
         raise ValueError(f"Unsupported action space type: {type(action_space)}")
@@ -504,16 +539,30 @@ class ICM(EvolvableModule):
 
         self.optimizer = None
         if params_to_optimize:
-            # self.optimizer = optim.Adam(params_to_optimize, lr=self.lr)
+            # Collect actual parameters from modules
+            all_params = []
+            for module in params_to_optimize:
+                all_params.extend(list(module.parameters()))
+            # self.optimizer = optim.Adam(all_params, lr=self.lr)
             self.params_to_optimize = params_to_optimize
+            self._collected_params = all_params
         else:
             # This can happen if use_internal_encoder is False and somehow inverse/forward models have no params.
             print(
                 "Warning: ICM has no parameters to optimize. Ensure this is intended."
             )
+            self._collected_params = []
 
         self.mse_loss_fn = nn.MSELoss(reduction="none")
         self.ce_loss_fn = nn.CrossEntropyLoss()
+
+        # Store hidden state dimensions if recurrent
+        self._hidden_state_architecture = None
+        if self.is_recurrent and self.use_internal_encoder and self.encoder:
+            # Initialize hidden state architecture from encoder
+            self._hidden_state_architecture = (
+                self._get_encoder_hidden_state_architecture()
+            )
 
     def _to_tensor(
         self, data: Any, dtype: Optional[torch.dtype] = None
@@ -616,8 +665,8 @@ class ICM(EvolvableModule):
         intrinsic_reward = 0.5 * mse_per_feature.sum(dim=1)
         intrinsic_reward *= self.intrinsic_reward_weight
 
-        returned_hidden_obs = hidden_state if not self.is_recurrent else None
-        returned_hidden_next_obs = next_hidden_state if not self.is_recurrent else None
+        returned_hidden_obs = hidden_state if self.is_recurrent else None
+        returned_hidden_next_obs = next_hidden_state if self.is_recurrent else None
         return intrinsic_reward, returned_hidden_obs, returned_hidden_next_obs
 
     def update(
@@ -671,14 +720,42 @@ class ICM(EvolvableModule):
 
     def compute_loss(
         self,
-        action_batch_t: torch.Tensor,
         obs_batch_t: torch.Tensor,
+        action_batch_t: torch.Tensor,
         next_obs_batch_t: torch.Tensor,
         embedded_obs: Optional[torch.Tensor] = None,
         embedded_next_obs: Optional[torch.Tensor] = None,
         hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         hidden_state_next: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    ):
+        action_input: Optional[torch.Tensor] = None,
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        Optional[Tuple[torch.Tensor, torch.Tensor]],
+        Optional[Tuple[torch.Tensor, torch.Tensor]],
+    ]:
+        """Compute ICM loss components.
+
+        :param obs_batch_t: Current observations
+        :type obs_batch_t: torch.Tensor
+        :param action_batch_t: Actions taken
+        :type action_batch_t: torch.Tensor
+        :param next_obs_batch_t: Next observations
+        :type next_obs_batch_t: torch.Tensor
+        :param embedded_obs: Pre-computed embeddings for current observations (optional)
+        :type embedded_obs: Optional[torch.Tensor]
+        :param embedded_next_obs: Pre-computed embeddings for next observations (optional)
+        :type embedded_next_obs: Optional[torch.Tensor]
+        :param hidden_state: Hidden state for current observations (optional)
+        :type hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]]
+        :param hidden_state_next: Hidden state for next observations (optional)
+        :type hidden_state_next: Optional[Tuple[torch.Tensor, torch.Tensor]]
+        :param action_input: Pre-computed one-hot encoded actions (optional)
+        :type action_input: Optional[torch.Tensor]
+        :return: Total loss, inverse loss, forward loss, and hidden states
+        :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[Tuple], Optional[Tuple]]
+        """
         # === Encoder pass ===
         # Gradients need to flow through phi_obs and phi_next_obs to train the encoder
         (
@@ -699,19 +776,24 @@ class ICM(EvolvableModule):
         # L_I trains the inverse model and the encoder (via phi_obs and phi_next_obs)
         pred_action_output = self.inverse_model(phi_obs, phi_next_obs)
 
+        # Convert actions to appropriate format if not already provided
+        if action_input is None:
+            # Use appropriate dtype based on action space type
+            dtype = torch.float32 if self.is_continuous_action else torch.long
+            action_batch_tensor = self._to_tensor(action_batch_t, dtype=dtype)
+            action_input = actions_to_one_hot(action_batch_tensor, self.action_space)
+
         if self.is_continuous_action:
             # For continuous actions, use MSE loss
-            target_actions = actions_to_one_hot(action_batch_t, self.action_space)
-            loss_I = self.mse_loss_fn(pred_action_output, target_actions).mean()
-            targets = target_actions  # For forward model input
+            loss_I = self.mse_loss_fn(pred_action_output, action_input).mean()
+            targets = action_input  # For forward model input
         else:
             # For discrete actions, use cross-entropy loss
-            targets = torch.zeros_like(pred_action_output)
+            targets = action_input
             if isinstance(self.action_space, spaces.Discrete):
-                targets = F.one_hot(
-                    action_batch_t.long(), num_classes=self.action_space.n
-                ).float()
-                loss_I = self.ce_loss_fn(pred_action_output, targets)
+                # Convert one-hot targets back to class indices for CrossEntropyLoss
+                targets_indices = torch.argmax(targets, dim=1)
+                loss_I = self.ce_loss_fn(pred_action_output, targets_indices)
             elif isinstance(self.action_space, spaces.MultiDiscrete):
                 # For MultiDiscrete, compute loss for each action dimension
                 losses_I = []
@@ -719,16 +801,8 @@ class ICM(EvolvableModule):
                 for i, action_size in enumerate(self.inverse_model.action_sizes):
                     end_idx = start_idx + action_size
                     logits_i = pred_action_output[:, start_idx:end_idx]
-                    targets_i = (
-                        F.one_hot(
-                            action_batch_t[:, i].long(), num_classes=action_size
-                        ).float()
-                        if action_batch_t.dim() > 1
-                        else F.one_hot(
-                            action_batch_t[i].long(), num_classes=action_size
-                        ).float()
-                    )
-                    targets[:, start_idx:end_idx] = targets_i
+                    # Convert one-hot targets back to class indices for CrossEntropyLoss
+                    targets_i = torch.argmax(targets[:, start_idx:end_idx], dim=1)
                     loss_i = self.ce_loss_fn(logits_i, targets_i)
                     losses_I.append(loss_i)
                     start_idx = end_idx
@@ -770,8 +844,8 @@ class ICM(EvolvableModule):
             # and using the returned loss to update the shared components (encoder, inv/fwd models).
             # This forward pass is for when ICM is a standalone component whose loss needs to be calculated.
             return self.compute_loss(
-                action_batch_t,
                 obs_batch_t,
+                action_batch_t,
                 next_obs_batch_t,
                 embedded_obs,
                 embedded_next_obs,
@@ -812,3 +886,69 @@ class ICM(EvolvableModule):
         clone = type(self)(**self.get_init_dict())
         clone.load_state_dict(self.state_dict())
         return clone
+
+    @property
+    def hidden_state_architecture(self) -> Optional[Dict[str, Tuple[int, ...]]]:
+        """Get the hidden state architecture for the ICM's encoder.
+
+        :return: Dictionary describing the hidden state architecture (name to shape)
+        :rtype: Optional[Dict[str, Tuple[int, ...]]]
+        """
+        return self._hidden_state_architecture
+
+    @property
+    def hidden_state_size(self) -> int:
+        """Get the hidden state size for the ICM's encoder (for backward compatibility).
+
+        :return: Hidden state size
+        :rtype: int
+        """
+        if self.is_recurrent and self.use_internal_encoder and self.encoder:
+            if hasattr(self.encoder, "lstm") and self.encoder.lstm:
+                return self.encoder.lstm.hidden_state_size
+        return 0
+
+    def _get_encoder_hidden_state_architecture(self) -> Dict[str, Tuple[int, ...]]:
+        """Get the hidden state architecture from the encoder.
+
+        :return: Dictionary describing the hidden state architecture
+        :rtype: Dict[str, Tuple[int, ...]]
+        """
+        if not self.is_recurrent or not self.use_internal_encoder or not self.encoder:
+            return {}
+
+        # Get a dummy hidden state to determine architecture
+        dummy_hidden = self.encoder.initialize_hidden_state(
+            batch_size=1, device=self.device
+        )
+        if dummy_hidden is None:
+            return {}
+
+        # Prepend 'icm_encoder_' to distinguish from actor/critic hidden states
+        return {f"icm_encoder_{k}": v.shape for k, v in dummy_hidden.items()}
+
+    def initialize_hidden_state(
+        self, batch_size: int = 1, device: Optional[Union[torch.device, str]] = None
+    ) -> Optional[Dict[str, torch.Tensor]]:
+        """Initialize hidden state for the ICM's encoder.
+
+        :param batch_size: Batch size for the hidden state
+        :type batch_size: int
+        :param device: Device to place the hidden state on
+        :type device: Optional[Union[torch.device, str]]
+        :return: Initial hidden state dictionary
+        :rtype: Optional[Dict[str, torch.Tensor]]
+        """
+        if not self.is_recurrent or not self.use_internal_encoder or not self.encoder:
+            return None
+
+        device = device or self.device
+        encoder_hidden = self.encoder.initialize_hidden_state(
+            batch_size=batch_size, device=device
+        )
+
+        if encoder_hidden is None:
+            return None
+
+        # Prepend 'icm_encoder_' to distinguish from actor/critic hidden states
+        return {f"icm_encoder_{k}": v for k, v in encoder_hidden.items()}

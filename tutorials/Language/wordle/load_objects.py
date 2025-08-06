@@ -1,6 +1,17 @@
 import json
 
 import torch
+
+from agilerl.algorithms.bc_lm import BC_LM, BC_Evaluator, BC_Policy
+from agilerl.algorithms.ilql import (
+    ILQL,
+    ILQL_Evaluator,
+    ILQL_Policy,
+    TopAdvantageNGrams,
+)
+from agilerl.data.rl_data import ConstantTokenReward, SepcifiedTokenReward
+from agilerl.modules.gpt import EvolvableGPT
+from agilerl.utils.ilql_utils import convert_path
 from wordle.policy import (
     MixturePolicy,
     MonteCarloPolicy,
@@ -22,17 +33,6 @@ from wordle.wordle_evaluators import (
     Action_Ranking_Evaluator_Adversarial,
 )
 from wordle.wordle_game import Vocabulary
-
-from agilerl.algorithms.bc_lm import BC_LM, BC_Evaluator, BC_Policy
-from agilerl.algorithms.ilql import (
-    ILQL,
-    ILQL_Evaluator,
-    ILQL_Policy,
-    TopAdvantageNGrams,
-)
-from agilerl.data.rl_data import ConstantTokenReward, SepcifiedTokenReward
-from agilerl.modules.gpt import EvolvableGPT
-from agilerl.utils.ilql_utils import convert_path
 
 registry = {}
 cache = {}
@@ -74,7 +74,9 @@ def load_model(config, model, device, verbose=True):
                 % (config["name"], convert_path(config["checkpoint_path"]))
             )
         chkpt_state_dict = torch.load(
-            convert_path(config["checkpoint_path"]), map_location="cpu"
+            convert_path(config["checkpoint_path"]),
+            map_location="cpu",
+            weights_only=False,
         )
         model.load_state_dict(chkpt_state_dict, strict=config["strict_load"])
         if verbose:

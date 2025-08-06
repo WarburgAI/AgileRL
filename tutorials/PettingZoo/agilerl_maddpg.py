@@ -99,6 +99,7 @@ if __name__ == "__main__":
         num_envs=num_envs,
         device=device,
     )[0]
+    agent.set_training_mode(True)
 
     # Configure the multi-agent replay buffer
     field_names = ["obs", "action", "reward", "next_obs", "done"]
@@ -133,13 +134,7 @@ if __name__ == "__main__":
         for idx_step in range(training_steps // num_envs):
 
             # Get next action from agent
-            cont_actions, discrete_action = agent.get_action(
-                obs=obs, training=True, infos=info
-            )
-            if agent.discrete_actions:
-                action = discrete_action
-            else:
-                action = cont_actions
+            action, raw_action = agent.get_action(obs=obs, infos=info)
 
             # Act in environment
             action = {agent: env.action_space(agent).sample() for agent in env.agents}
@@ -160,7 +155,7 @@ if __name__ == "__main__":
             # Save experiences to replay buffer
             memory.save_to_memory(
                 obs,
-                cont_actions,
+                raw_action,
                 reward,
                 next_obs,
                 termination,

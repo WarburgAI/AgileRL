@@ -14,6 +14,8 @@ from .neural_ts_bandit import NeuralTS
 from .neural_ucb_bandit import NeuralUCB
 from .ppo import PPO
 from .td3 import TD3
+from .cvar_ppo import CPPO
+from .icm_ppo import ICM_PPO
 
 __all__ = [
     "BC_LM",
