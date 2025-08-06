@@ -3,7 +3,6 @@ import warnings
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Union
 
-from agilerl.algorithms.core.base import RLAlgorithm
 import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
@@ -23,8 +22,6 @@ from agilerl.algorithms import (
     MADDPG,
     MATD3,
     PPO,
-    CPPO,
-    ICM_PPO,
     TD3,
     NeuralTS,
     NeuralUCB,
@@ -35,7 +32,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.base import EvolvableModule
-from agilerl.typing import GymEnvType, GymSpaceType, PopulationType
+from agilerl.typing import GymSpaceType, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
@@ -104,6 +101,9 @@ def make_skill_vect_envs(
 
     :param env_name: Gym environment name
     :type env_name: str
+    :param skill: Skill wrapper to apply to environment
+    :type skill: agilerl.wrappers.learning.Skill
+    :param num_envs: Number of vectorized environments, defaults to 1
     :param skill: Skill wrapper to apply to environment
     :type skill: agilerl.wrappers.learning.Skill
     :param num_envs: Number of vectorized environments, defaults to 1
@@ -182,8 +182,20 @@ def create_population(
     :type action_space: spaces.Space
     :param net_config: Network configuration
     :type net_config: dict or None
+    :param observation_space: Observation space
+    :type observation_space: spaces.Space
+    :param action_space: Action space
+    :type action_space: spaces.Space
+    :param net_config: Network configuration
+    :type net_config: dict or None
     :param INIT_HP: Initial hyperparameters
     :type INIT_HP: dict
+    :param hp_config: Choice of algorithm hyperparameters to mutate during training, defaults to None
+    :type hp_config: HyperparameterConfig, optional
+    :param actor_network: Custom actor network, defaults to None
+    :type actor_network: nn.Module, optional
+    :param critic_network: Custom critic network, defaults to None
+    :type critic_network: nn.Module, optional
     :param hp_config: Choice of algorithm hyperparameters to mutate during training, defaults to None
     :type hp_config: HyperparameterConfig, optional
     :param actor_network: Custom actor network, defaults to None
@@ -908,8 +920,16 @@ def print_hyperparams(pop: PopulationType) -> None:
 
     :param pop: Population of agents
     :type pop: list[EvolvableAlgorithm]
+    :type pop: list[EvolvableAlgorithm]
     """
     for agent in pop:
+        print(
+            "Agent ID: {}    Mean 5 Fitness: {:.2f}    Attributes: {}".format(
+                agent.index,
+                np.mean(agent.fitness[-5:]),
+                EvolvableAlgorithm.inspect_attributes(agent),
+            )
+        )
         print(
             "Agent ID: {}    Mean 5 Fitness: {:.2f}    Attributes: {}".format(
                 agent.index,
@@ -923,6 +943,7 @@ def plot_population_score(pop: PopulationType) -> None:
     """Plots the fitness scores of agents in a population.
 
     :param pop: Population of agents
+    :type pop: list[EvolvableAlgorithm]
     :type pop: list[EvolvableAlgorithm]
     """
     plt.figure()

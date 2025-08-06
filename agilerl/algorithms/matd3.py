@@ -956,7 +956,6 @@ class MATD3(MultiAgentRLAlgorithm):
                         ) and not finished[idx]:
                             completed_episode_scores[idx] = scores[idx]
                             finished[idx] = 1
-
                 rewards.append(np.mean(completed_episode_scores, axis=0))
 
         mean_fit = np.mean(rewards, axis=0)

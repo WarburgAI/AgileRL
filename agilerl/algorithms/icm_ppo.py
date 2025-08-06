@@ -2,13 +2,28 @@ import copy
 import warnings
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
-from agilerl.components.rollout_buffer import RolloutBuffer
+import numpy as np
+import torch
+import torch.optim as optim
+from gymnasium import spaces
+from tensordict import TensorDict
+from torch.nn.utils import clip_grad_norm_
+
+from agilerl.algorithms.core.base import RLAlgorithm
+from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
+
+# Imports managed by the broader environment, placeholders for linting/type-checking
+from agilerl.components.icm import (
+    ICM,
+)
+from agilerl.components.rollout_buffer import RolloutBuffer
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import StochasticActor
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.value_networks import ValueNetwork
+from agilerl.typing import ArrayOrTensor, BPTTSequenceType, ExperiencesType, GymEnvType
 from agilerl.utils.algo_utils import (
     flatten_experiences,
     get_experiences_samples,
@@ -17,26 +32,6 @@ from agilerl.utils.algo_utils import (
     obs_channels_to_first,
     share_encoder_parameters,
     stack_experiences,
-)
-
-import numpy as np
-import torch
-import torch.nn.functional as F
-import torch.optim as optim
-from gymnasium import spaces
-from torch.nn.utils import clip_grad_norm_
-from tensordict import TensorDict
-
-from agilerl.algorithms.core.base import RLAlgorithm
-from agilerl.algorithms.ppo import PPO
-from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.typing import ArrayOrTensor, ExperiencesType, GymEnvType, BPTTSequenceType
-
-# Imports managed by the broader environment, placeholders for linting/type-checking
-from agilerl.components.icm import (
-    ICM,
-    get_evolvable_cnn_config,
-    get_evolvable_mlp_config,
 )
 
 
@@ -288,15 +283,15 @@ class ICM_PPO(RLAlgorithm):
         )
 
         # New parameters for using RolloutBuffer
-        assert isinstance(use_rollout_buffer, bool), (
-            "Use rollout buffer flag must be boolean value True or False."
-        )
-        assert isinstance(recurrent, bool), (
-            "Has hidden states flag must be boolean value True or False."
-        )
-        assert isinstance(bptt_sequence_type, BPTTSequenceType), (
-            "bptt_sequence_type must be a BPTTSequenceType enum value."
-        )
+        assert isinstance(
+            use_rollout_buffer, bool
+        ), "Use rollout buffer flag must be boolean value True or False."
+        assert isinstance(
+            recurrent, bool
+        ), "Has hidden states flag must be boolean value True or False."
+        assert isinstance(
+            bptt_sequence_type, BPTTSequenceType
+        ), "bptt_sequence_type must be a BPTTSequenceType enum value."
 
         if not use_rollout_buffer:
             warnings.warn(
@@ -823,9 +818,8 @@ class ICM_PPO(RLAlgorithm):
                 next_hidden,
             )
             combined_reward = (
-                (1 - self.intrinsic_reward_weight) * reward
-                + intrinsic_reward.detach().cpu().numpy()
-            )  # intrinsic reward is already weighted by self.intrinsic_reward_weight
+                1 - self.intrinsic_reward_weight
+            ) * reward + intrinsic_reward.detach().cpu().numpy()  # intrinsic reward is already weighted by self.intrinsic_reward_weight
 
             # Handle both single environment and vectorized environments terminal states
             if isinstance(done, list) or isinstance(done, np.ndarray):
@@ -1152,12 +1146,12 @@ class ICM_PPO(RLAlgorithm):
                                 next_obs_batch_t=batch_states[1:],
                                 embedded_obs=batch_latent_pi[:-1],
                                 embedded_next_obs=batch_latent_pi[1:],
-                                hidden_state=hidden_state[:-1]
-                                if hidden_state
-                                else None,
-                                hidden_state_next=hidden_state[1:]
-                                if hidden_state
-                                else None,
+                                hidden_state=(
+                                    hidden_state[:-1] if hidden_state else None
+                                ),
+                                hidden_state_next=(
+                                    hidden_state[1:] if hidden_state else None
+                                ),
                             )
                         )
 
@@ -1183,12 +1177,12 @@ class ICM_PPO(RLAlgorithm):
                             obs_batch=batch_states[:-1],
                             action_batch=batch_actions,
                             next_obs_batch=batch_states[1:],
-                            hidden_state_obs=hidden_state[:-1]
-                            if hidden_state
-                            else None,
-                            hidden_state_next_obs=hidden_state[1:]
-                            if hidden_state
-                            else None,
+                            hidden_state_obs=(
+                                hidden_state[:-1] if hidden_state else None
+                            ),
+                            hidden_state_next_obs=(
+                                hidden_state[1:] if hidden_state else None
+                            ),
                         )
 
                     mean_loss += final_loss.item()
@@ -1325,16 +1319,16 @@ class ICM_PPO(RLAlgorithm):
                         obs_batch=mb_obs[:-1],
                         action_batch=mb_actions,
                         next_obs_batch=mb_obs[1:],
-                        hidden_state_obs=eval_hidden_state[:-1]
-                        if eval_hidden_state
-                        else None,
-                        hidden_state_next_obs=eval_hidden_state[1:]
-                        if eval_hidden_state
-                        else None,
+                        hidden_state_obs=(
+                            eval_hidden_state[:-1] if eval_hidden_state else None
+                        ),
+                        hidden_state_next_obs=(
+                            eval_hidden_state[1:] if eval_hidden_state else None
+                        ),
                     )
-                    mean_icm_loss += icm_total_loss.item()
-                    mean_icm_i_loss += icm_i_loss.item()
-                    mean_icm_f_loss += icm_f_loss.item()
+                    # mean_icm_loss += icm_total_loss.item()
+                    # mean_icm_i_loss += icm_i_loss.item()
+                    # mean_icm_f_loss += icm_f_loss.item()
 
                 mean_loss += loss.item()
                 num_minibatches_this_epoch += 1
@@ -1535,9 +1529,9 @@ class ICM_PPO(RLAlgorithm):
                         hidden_state_obs=mb_initial_hidden_states_dict,
                         hidden_state_next_obs=mb_initial_hidden_states_dict,
                     )
-                    mean_icm_loss += icm_total_loss.item()
-                    mean_icm_i_loss += icm_i_loss.item()
-                    mean_icm_f_loss += icm_f_loss.item()
+                    # mean_icm_loss += icm_total_loss.item()
+                    # mean_icm_i_loss += icm_i_loss.item()
+                    # mean_icm_f_loss += icm_f_loss.item()
 
                 mean_loss += loss.item()
                 num_minibatches_this_epoch += 1
@@ -1957,9 +1951,9 @@ class ICM_PPO(RLAlgorithm):
                                     :, newly_finished, :
                                 ]
                                 if reset_states.shape[1] > 0:
-                                    test_hidden_state[key][:, newly_finished, :] = (
-                                        reset_states
-                                    )
+                                    test_hidden_state[key][
+                                        :, newly_finished, :
+                                    ] = reset_states
 
                     if np.any(newly_finished):
                         completed_episode_scores[newly_finished] = scores[

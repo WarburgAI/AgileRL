@@ -409,7 +409,6 @@ def test_initialize_matd3_with_mlp_networks(
         assert all(isinstance(actor, MakeEvolvable) for actor in matd3.actors)
         assert all(isinstance(critic, MakeEvolvable) for critic in matd3.critics_1)
         assert all(isinstance(critic, MakeEvolvable) for critic in matd3.critics_2)
-
     assert matd3.observation_spaces == observation_spaces
     assert matd3.action_spaces == action_spaces
     assert matd3.n_agents == 2

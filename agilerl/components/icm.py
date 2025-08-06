@@ -1,15 +1,15 @@
+from typing import Any, Dict, Optional, Tuple, Union
+
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
-import numpy as np
-from gymnasium import spaces
-from typing import Optional, Dict, Tuple, Union, Any
 import torch.nn.functional as F
+from gymnasium import spaces
 
-from agilerl.modules.mlp import EvolvableMLP
+from agilerl.modules.base import EvolvableModule
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.lstm import EvolvableLSTM
-from agilerl.modules.base import EvolvableModule
+from agilerl.modules.mlp import EvolvableMLP
 
 
 # Configuration helpers
@@ -211,6 +211,7 @@ class ICMFeatureEncoder(EvolvableModule):
         obs: torch.Tensor,
         hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+
         if self.arch == "mlp":
             obs = obs.reshape(obs.size(0), -1)
         elif self.arch == "cnn":
@@ -255,7 +256,9 @@ class ICMFeatureEncoder(EvolvableModule):
         return init_dict
 
     def get_output_dim(self):
-        return self.output_dim  # Required by EvolvableModule if not using `num_outputs` directly in constructor
+        return (
+            self.output_dim
+        )  # Required by EvolvableModule if not using `num_outputs` directly in constructor
 
     def clone(self):
         """Returns a deep copy of the module."""
