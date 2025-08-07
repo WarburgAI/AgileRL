@@ -158,7 +158,7 @@ class PBIM_ICM_PPO(ICM_PPO):
         if buffer_td_external:
             buffer_td = buffer_td_external
         else:
-            buffer_td = self.rollout_buffer.get()
+            buffer_td = self.rollout_buffer.get_tensor_batch(device=self.device)
 
         potential, next_potential = self.get_potentials(
             action_batch=buffer_td["actions"],
@@ -197,8 +197,8 @@ class PBIM_ICM_PPO(ICM_PPO):
         if not self.pbim:
             return super()._learn_from_rollout_buffer_bptt()
 
-        buffer_td = self.rollout_buffer.get()
-        num_sequences = buffer_td.shape[1]
+        buffer_td = self.rollout_buffer.get_tensor_batch(device=self.device)
+        num_sequences = buffer_td["observations"].shape[1]
 
         # Reshape for sequence-based processing
         obs = buffer_td["observations"].reshape(
