@@ -166,6 +166,7 @@ def run_demo():
         population_size=INIT_HP["POP_SIZE"],
         num_envs=num_envs,
         device=device,
+        algo_kwargs={"recurrent": recurrent, "use_rollout_buffer": True},
     )
 
     # --- Setup Evolution Components ---

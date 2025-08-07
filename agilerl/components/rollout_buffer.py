@@ -1,5 +1,5 @@
 import random  # Added to support random sequence sampling for BPTT
-import warnings
+import warnings  # Already imported, but for completeness
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -599,14 +599,7 @@ class RolloutBuffer:
     def _sample_sequence_start_indices(
         self, seq_len: int, batch_size: int
     ) -> List[Tuple[int, int]]:
-        """Helper to randomly sample (time_idx, env_idx) pairs that can serve as
-        the starting positions for sequences of length ``seq_len``.
-
-        :param seq_len: Desired sequence length.
-        :param batch_size: Number of sequences to sample.
-        :return: List of tuples (time_idx, env_idx) identifying the first element
-                 of every sampled sequence.
-        """
+        """Sample starting (env_idx, time_idx) pairs for sequences of length seq_len."""
         buffer_size = self.capacity if self.full else self.pos
 
         if seq_len > buffer_size:
@@ -622,13 +615,26 @@ class RolloutBuffer:
         if max_start_time_idx < 0:  # Not enough data in buffer for even one sequence
             return []
 
-        valid_coords: List[Tuple[int, int]] = [
-            (env_idx, t_idx)
-            for env_idx in range(self.num_envs)
-            for t_idx in range(max_start_time_idx + 1)
-        ]
+        valid_coords = []
+        for env_idx in range(self.num_envs):
+            for t_idx in range(max_start_time_idx + 1):
+                if self.recurrent:
+                    # Check if the sequence [t_idx+1 : t_idx + seq_len] has any episode_start=True
+                    # If yes, it crosses a boundary, skip
+                    episode_starts_in_seq = self.buffer["episode_starts"][
+                        t_idx + 1 : t_idx + seq_len, env_idx
+                    ]
+                    if torch.any(episode_starts_in_seq):
+                        continue
+                valid_coords.append((env_idx, t_idx))
 
         if not valid_coords:  # Should be caught by max_start_time_idx < 0 check too
+            return []
+
+        if len(valid_coords) == 0:
+            warnings.warn(
+                f"No valid sequences of length {seq_len} found that do not cross episode boundaries."
+            )
             return []
 
         if batch_size is None or batch_size >= len(valid_coords):
