@@ -629,7 +629,6 @@ def create_population(
                 share_encoders=INIT_HP.get("SHARE_ENCODERS", True),
                 actor_network=actor_network,
                 critic_network=critic_network,
-                pbim=INIT_HP.get("pbim", False),
                 device=device,
                 accelerator=accelerator,
                 num_envs=num_envs,
