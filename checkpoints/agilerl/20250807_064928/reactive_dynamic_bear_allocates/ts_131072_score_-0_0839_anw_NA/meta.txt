@@ -1,5 +1,0 @@
-score (recent_mean): -0.08392459857435824
-total_steps: 131072
-average_net_worth: None
-datetime: 2025-08-07_06-50-37
-trial_name: reactive_dynamic_bear_allocates
