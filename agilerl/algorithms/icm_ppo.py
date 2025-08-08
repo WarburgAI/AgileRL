@@ -326,7 +326,7 @@ class ICM_PPO(RLAlgorithm):
         self.icm_encoder_net_config = icm_encoder_net_config
         self.icm_inverse_net_config = icm_inverse_net_config
         self.icm_forward_net_config = icm_forward_net_config
-
+        self.pbim = pbim
         if actor_network is not None and critic_network is not None:
             if not isinstance(actor_network, EvolvableModule):
                 raise TypeError(
