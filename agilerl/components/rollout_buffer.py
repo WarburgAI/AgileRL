@@ -127,23 +127,28 @@ class RolloutBuffer:
         if isinstance(self.action_space, spaces.Discrete):
             action_shape = ()
             action_dtype = torch.int64
+            mask_dim = int(self.action_space.n)
         elif isinstance(self.action_space, spaces.Box):
             action_shape = self.action_space.shape
             action_dtype = convert_np_to_torch_dtype(
                 self.action_space.dtype
             )  # Convert numpy dtype to torch dtype
+            mask_dim = 0  # no mask support for Box
         elif isinstance(self.action_space, spaces.MultiDiscrete):
             action_shape = (len(self.action_space.nvec),)
             action_dtype = torch.int64
+            mask_dim = int(np.sum(self.action_space.nvec))
         elif isinstance(self.action_space, spaces.MultiBinary):
             action_shape = (self.action_space.n,)
             action_dtype = torch.int64
+            mask_dim = int(self.action_space.n)
         else:
             try:
                 action_shape = self.action_space.shape
                 action_dtype = convert_np_to_torch_dtype(
                     getattr(self.action_space, "dtype", np.float32)
                 )  # Convert numpy dtype to torch dtype
+                mask_dim = 0
             except AttributeError:
                 raise TypeError(
                     f"Unsupported action space type without shape: {type(self.action_space)}"
@@ -212,6 +217,11 @@ class RolloutBuffer:
                 ),
             }
         )
+        # Optional action masks (all-true by default = all actions legal)
+        if mask_dim > 0:
+            source_dict["action_masks"] = torch.ones(
+                (self.capacity, self.num_envs, mask_dim), dtype=torch.bool
+            )
 
         if self.recurrent:
             if self.hidden_state_architecture is None:
@@ -258,6 +268,7 @@ class RolloutBuffer:
             Dict[str, ArrayOrTensor]
         ] = None,  # Not used if only initial hidden states are stored
         episode_start: Optional[Union[bool, np.ndarray]] = None,
+        action_mask: Optional[ArrayOrTensor] = None,
     ) -> None:
         """
         Add a new batch of observations and associated data from vectorized environments to the buffer.
@@ -282,6 +293,8 @@ class RolloutBuffer:
         :type next_hidden_state: Optional[Dict[str, ArrayOrTensor]]
         :param episode_start: Episode start flag batch (shape: (num_envs,)), defaults to None
         :type episode_start: Optional[Union[bool, np.ndarray]]
+        :param action_mask: Optional action mask for this step (shape: (num_envs, mask_dim)), defaults to None
+        :type action_mask: Optional[ArrayOrTensor]
         """
         if self.pos == self.capacity:
             if self.wrap_at_capacity:
@@ -396,6 +409,18 @@ class RolloutBuffer:
                 current_step_data["hidden_states"][key] = ppo_tensor_val.permute(
                     1, 0, 2
                 )  # Shape: (num_envs, layers, size)
+
+        # Action masks (optional)
+        if "action_masks" in self.buffer.keys(True) and action_mask is not None:
+            am = torch.as_tensor(action_mask, dtype=torch.bool, device="cpu")
+            if am.ndim == 1:
+                am = am.unsqueeze(0)  # (mask_dim,) -> (1, mask_dim)
+            current_step_data["action_masks"] = am.reshape(self.num_envs, -1)
+        elif "action_masks" in self.buffer.keys(True):
+            # default to all-true if not provided at this step
+            current_step_data["action_masks"] = torch.ones(
+                self.num_envs, self.buffer["action_masks"].shape[-1], dtype=torch.bool
+            )
 
         # Create a TensorDict for the current step's data
         # This will have batch_size [num_envs]

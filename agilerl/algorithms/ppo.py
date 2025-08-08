@@ -666,15 +666,21 @@ class PPO(RLAlgorithm):
                 "clip_fraction": clip_fraction,
             }
         # ---------------------- FLAT (non-BPTT) path ----------------------
-        # Get values/entropy (no sampling) and the latent features
-        _, _, entropy_t, new_value_t, _ = self._get_action_and_values(
-            obs, action_mask=action_mask, hidden_state=hidden_state, sample=False
+        # Compute latent features once (no resampling)
+        latent = self.actor.extract_features(obs, hidden_state=hidden_state)
+        # Log-prob / entropy under CURRENT policy with mask-aware head
+        new_log_prob_t = self.actor.head_net.log_prob_from_latent(
+            latent, actions, action_mask=action_mask
         )
-        # Log-prob of buffer actions under CURRENT policy
-        new_log_prob_t = self.actor.action_log_prob(actions)
-        # Entropy fallback for squashed Box
-        if entropy_t is None:
-            entropy_t = -new_log_prob_t
+        entropy_t = self.actor.head_net.entropy_from_latent(
+            latent, action_mask=action_mask
+        )
+        # Values (reuse latent if encoders shared)
+        if self.share_encoders:
+            new_value_t = self.critic.forward_head(latent).squeeze(-1)
+        else:
+            new_value_t = self.critic(obs).squeeze(-1)
+
         ratio = torch.exp(new_log_prob_t - old_log_probs)
         policy_loss1 = -advantages * ratio
         policy_loss2 = -advantages * torch.clamp(
@@ -682,14 +688,14 @@ class PPO(RLAlgorithm):
         )
         policy_loss = torch.max(policy_loss1, policy_loss2).mean()
         if old_values is not None:
-            v_loss_unclipped = (new_value_t.squeeze() - returns) ** 2
+            v_loss_unclipped = (new_value_t - returns) ** 2
             v_clipped = old_values + torch.clamp(
-                new_value_t.squeeze() - old_values, -self.clip_coef, self.clip_coef
+                new_value_t - old_values, -self.clip_coef, self.clip_coef
             )
             v_loss_clipped = (v_clipped - returns) ** 2
             value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
         else:
-            value_loss = 0.5 * ((new_value_t.squeeze() - returns) ** 2).mean()
+            value_loss = 0.5 * ((new_value_t - returns) ** 2).mean()
         entropy_loss = -entropy_t.mean()
         loss = policy_loss + self.vf_coef * value_loss + self.ent_coef * entropy_loss
         with torch.no_grad():
@@ -819,6 +825,11 @@ class PPO(RLAlgorithm):
                 ]  # Use globally normalized advantages
                 mb_returns = minibatch_td["returns"]
                 mb_old_values = minibatch_td["values"]
+                mb_action_masks = (
+                    minibatch_td.get("action_masks")
+                    if "action_masks" in minibatch_td.keys(include_nested=True)
+                    else None
+                )
 
                 eval_hidden_state = None
                 if self.recurrent:
@@ -848,6 +859,7 @@ class PPO(RLAlgorithm):
                         hidden_state=eval_hidden_state,
                         old_values=mb_old_values,
                         learn_by_bptt=False,
+                        action_mask=mb_action_masks,
                     )
                 loss = loss_dict["loss"]
 
@@ -1012,6 +1024,11 @@ class PPO(RLAlgorithm):
                 mb_old_values_seq = current_minibatch_td[
                     "values"
                 ]  # Shape: (batch_seq, seq_len)
+                mb_action_masks_seq = (
+                    current_minibatch_td.get("action_masks")
+                    if "action_masks" in current_minibatch_td.keys(include_nested=True)
+                    else None
+                )
 
                 mb_initial_hidden_states_dict = current_minibatch_td.get_non_tensor(
                     "initial_hidden_states", default=None
@@ -1039,6 +1056,7 @@ class PPO(RLAlgorithm):
                         old_values=mb_old_values_seq,
                         learn_by_bptt=True,
                         seq_len=seq_len,
+                        action_mask=mb_action_masks_seq,
                     )
                 loss = loss_dict["loss"]
 

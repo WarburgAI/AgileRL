@@ -169,7 +169,7 @@ class CategoricalHandler:
         :param action: Action.
         :type action: torch.Tensor
         """
-        return distribution.log_prob(action)
+        return distribution.log_prob(action.long())
 
     def entropy(self, distribution: Categorical) -> torch.Tensor:
         """Get the entropy of the action distribution.
@@ -215,7 +215,7 @@ class MultiCategoricalHandler:
         :param action: Action.
         :type action: torch.Tensor
         """
-        unbinded_actions = torch.unbind(action, dim=1)
+        unbinded_actions = torch.unbind(action.long(), dim=1)
         multi_log_prob = [
             dist.log_prob(act) for dist, act in zip(distribution, unbinded_actions)
         ]
@@ -267,9 +267,9 @@ class TorchDistribution:
         squash_output: bool = False,
     ) -> None:
         if isinstance(distribution, list):
-            assert all(isinstance(d, Categorical) for d in distribution), (
-                "Only list of Categorical distributions are supported (for MultiDiscrete action spaces)."
-            )
+            assert all(
+                isinstance(d, Categorical) for d in distribution
+            ), "Only list of Categorical distributions are supported (for MultiDiscrete action spaces)."
 
         self.distribution = distribution
         self.squash_output = squash_output
@@ -314,15 +314,16 @@ class TorchDistribution:
         :return: Log probability of the action.
         :rtype: torch.Tensor
         """
-        _action = action if not self.squash_output else self.sampled_action
+        if not self.squash_output:
+            return self._handler.log_prob(self.distribution, action)
 
-        log_prob = self._handler.log_prob(self.distribution, _action)
-
-        # Correction for squashed outputs as per SAC paper:
-        # See https://arxiv.org/html/2410.16739v1
-        if self.squash_output:
-            log_prob -= torch.log(1 - action.pow(2) + 1e-6).sum(dim=1)
-
+        # For squashed, ensure we have a pre-tanh value
+        pre_tanh = self.sampled_action
+        if pre_tanh is None:
+            eps = 1e-6
+            pre_tanh = torch.atanh(action.clamp(-1 + eps, 1 - eps))
+        log_prob = self._handler.log_prob(self.distribution, pre_tanh)
+        log_prob -= torch.log(1 - action.pow(2) + 1e-6).sum(dim=1)
         return log_prob
 
     def entropy(self) -> Optional[torch.Tensor]:
