@@ -1,8 +1,7 @@
 """Functions for collecting rollouts for on-policy algorithms."""
 
-import time
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -92,6 +91,7 @@ class RolloutHook(ABC):
             next_obs=buffer_data["next_obs"],
             hidden_state=buffer_data["hidden_state"],
             episode_start=np.atleast_1d(buffer_data["episode_start"]),
+            action_mask=buffer_data.get("action_mask", None),
         )
 
     def on_episode_end(
@@ -426,17 +426,35 @@ def _collect_rollouts(
             for hook in hooks:
                 step_data = hook.on_step_start(agent, obs, info, step_data)
 
+            # Build action mask robustly for vectorized infos
+            action_mask = None
+            if (
+                isinstance(info, (list, np.ndarray))
+                and len(info) == agent.num_envs
+                and all(isinstance(i, dict) for i in info)
+            ):
+                masks = [env_info.get("action_mask") for env_info in info]
+                if all(m is not None for m in masks):
+                    try:
+                        action_mask = np.stack(masks)
+                    except Exception:
+                        action_mask = None
+                elif any(m is not None for m in masks):
+                    action_mask = None
+            elif isinstance(info, dict):
+                action_mask = info.get("action_mask", None)
+
+            step_data["action_mask"] = action_mask
+
             # Get action, statistics and (maybe) recurrent hidden state from agent
             if recurrent:
                 action_result = agent.get_action(
                     obs,
-                    action_mask=info.get("action_mask", None),
+                    action_mask=action_mask,
                     hidden_state=current_hidden_state_for_actor,
                 )
             else:
-                action_result = agent.get_action(
-                    obs, action_mask=info.get("action_mask", None)
-                )
+                action_result = agent.get_action(obs, action_mask=action_mask)
 
             # Process action result through hooks
             processed_result = primary_hook.process_action_result(
@@ -523,8 +541,13 @@ def _collect_rollouts(
             done = np.atleast_1d(is_terminal)
             done = done.astype(bool)
 
+            # Update episode starts for next step
+            last_episode_starts = done
+
             if recurrent and np.any(done):
-                finished_mask = done.astype(bool)
+                finished_mask = torch.as_tensor(
+                    done, dtype=torch.bool, device=agent.device
+                )
                 initial_hidden_states_for_reset = agent.get_initial_hidden_state(
                     agent.num_envs
                 )
@@ -575,8 +598,7 @@ def _collect_rollouts(
             last_value = action_result[3]
 
             last_value = last_value.cpu().numpy()
-            last_done = np.atleast_1d(term)
-            last_done = last_done.astype(bool)
+            last_done = np.atleast_1d(done).astype(bool)
 
         agent.rollout_buffer.compute_returns_and_advantages(
             last_value=last_value, last_done=last_done

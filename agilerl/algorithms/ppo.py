@@ -1,5 +1,4 @@
 import copy
-import time
 import warnings
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
@@ -611,7 +610,14 @@ class PPO(RLAlgorithm):
             )
             # Values from critic
             if self.share_encoders:
-                new_values = self.critic.forward_head(features_seq).squeeze(-1)  # [B,T]
+                # Ensure critic head receives 2D [B*T, latent] input, then reshape back to [B, T]
+                B, T = features_seq.shape[:2]
+                flat_feat_for_critic = features_seq.reshape(B * T, -1)
+                new_values = (
+                    self.critic.forward_head(flat_feat_for_critic)
+                    .squeeze(-1)
+                    .view(B, T)
+                )
             else:
                 new_values, _ = self.critic.sequence_forward(obs, hidden_state)
                 new_values = new_values.squeeze(-1)  # [B,T]
@@ -777,7 +783,7 @@ class PPO(RLAlgorithm):
         4. Call learn() without arguments to train on collected rollouts
         """
         raise NotImplementedError(
-            "This method is not out of date. Use learn() instead."
+            "This method is now out of date. Use learn() instead."
         )
 
     def _learn_from_rollout_buffer_flat(
@@ -921,7 +927,7 @@ class PPO(RLAlgorithm):
                     "No advantages to normalize in BPTT pre-normalization step."
                 )
 
-        # Determine all possible start coordinates for sequences
+        # Determine boundary-safe start coordinates for sequences (avoid crossing episode boundaries)
         num_possible_starts_per_env = buffer_actual_size - seq_len + 1
         if num_possible_starts_per_env <= 0:
             warnings.warn(
@@ -929,39 +935,27 @@ class PPO(RLAlgorithm):
             )
             return
 
-        all_start_coords = []  # List of (env_idx, time_idx_in_env_rollout)
+        # Use the buffer's boundary-aware sampler to get all valid starts, then apply stride/filtering
+        candidate_coords = self.rollout_buffer._sample_sequence_start_indices(
+            seq_len=seq_len, batch_size=None
+        )
+
+        all_start_coords: list[tuple[int, int]] = []
         if self.bptt_sequence_type == BPTTSequenceType.CHUNKED:
-            num_chunks_per_env = buffer_actual_size // seq_len
-            if num_chunks_per_env == 0:
-                warnings.warn(
-                    f"Not enough data for any full chunks of length {seq_len}. Skipping BPTT."
-                )
-                return
-            for env_idx in range(self.num_envs):
-                for chunk_i in range(num_chunks_per_env):
-                    all_start_coords.append((env_idx, chunk_i * seq_len))
+            all_start_coords = [
+                (env_idx, t_idx)
+                for (env_idx, t_idx) in candidate_coords
+                if (t_idx % seq_len) == 0
+            ]
         elif self.bptt_sequence_type == BPTTSequenceType.MAXIMUM:
-            for env_idx in range(self.num_envs):
-                for t_idx in range(num_possible_starts_per_env):
-                    all_start_coords.append((env_idx, t_idx))
+            all_start_coords = list(candidate_coords)
         elif self.bptt_sequence_type == BPTTSequenceType.FIFTY_PERCENT_OVERLAP:
-            step_size = seq_len // 2
-            if step_size == 0:  # Fallback for seq_len=1
-                warnings.warn(
-                    f"Sequence length {seq_len} too short for 50% overlap. Using CHUNKED behavior."
-                )
-                num_chunks_per_env = buffer_actual_size // seq_len
-                if num_chunks_per_env == 0:
-                    return  # Not enough for even one chunk
-                for env_idx in range(self.num_envs):
-                    for chunk_i in range(num_chunks_per_env):
-                        all_start_coords.append((env_idx, chunk_i * seq_len))
-            else:
-                for env_idx in range(self.num_envs):
-                    for time_idx in range(
-                        0, buffer_actual_size - seq_len + 1, step_size
-                    ):
-                        all_start_coords.append((env_idx, time_idx))
+            step_size = max(1, seq_len // 2)
+            all_start_coords = [
+                (env_idx, t_idx)
+                for (env_idx, t_idx) in candidate_coords
+                if (t_idx % step_size) == 0
+            ]
         else:
             raise ValueError(f"Unknown BPTTSequenceType: {self.bptt_sequence_type}")
 
@@ -1225,14 +1219,15 @@ class PPO(RLAlgorithm):
                             num_envs
                         )
                         if isinstance(test_hidden_state, dict):
+                            mask_t = torch.as_tensor(
+                                newly_finished, dtype=torch.bool, device=self.device
+                            )
                             for key in test_hidden_state:
                                 reset_states = initial_hidden_states_for_reset[key][
-                                    :, newly_finished, :
+                                    :, mask_t, :
                                 ]
                                 if reset_states.shape[1] > 0:
-                                    test_hidden_state[key][
-                                        :, newly_finished, :
-                                    ] = reset_states
+                                    test_hidden_state[key][:, mask_t, :] = reset_states
 
                     if np.any(newly_finished):
                         completed_episode_scores[newly_finished] = scores[
