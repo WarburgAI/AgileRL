@@ -267,9 +267,9 @@ class TorchDistribution:
         squash_output: bool = False,
     ) -> None:
         if isinstance(distribution, list):
-            assert all(
-                isinstance(d, Categorical) for d in distribution
-            ), "Only list of Categorical distributions are supported (for MultiDiscrete action spaces)."
+            assert all(isinstance(d, Categorical) for d in distribution), (
+                "Only list of Categorical distributions are supported (for MultiDiscrete action spaces)."
+            )
 
         self.distribution = distribution
         self.squash_output = squash_output
@@ -508,6 +508,20 @@ class EvolvableDistribution(EvolvableWrapper):
 
         return masked_logits
 
+    def build_dist_from_latent(self, latent, action_mask=None):
+        logits = self.wrapped(latent)
+        if action_mask is not None:
+            logits = self.apply_mask(logits, action_mask)
+        return self.get_distribution(logits)
+
+    def log_prob_from_latent(self, latent, actions, action_mask=None):
+        dist = self.build_dist_from_latent(latent, action_mask)
+        return dist.log_prob(actions)
+
+    def entropy_from_latent(self, latent, action_mask=None):
+        dist = self.build_dist_from_latent(latent, action_mask)
+        return dist.entropy()
+
     def forward(
         self,
         latent: torch.Tensor,
@@ -550,6 +564,7 @@ class EvolvableDistribution(EvolvableWrapper):
 
         if deterministic:
             action = self.dist.mode()
+            log_prob = self.dist.log_prob(action)
         elif sample:
             action = self.dist.sample()
             log_prob = self.dist.log_prob(action)

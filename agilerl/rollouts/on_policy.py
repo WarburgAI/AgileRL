@@ -1,5 +1,6 @@
 """Functions for collecting rollouts for on-policy algorithms."""
 
+import numpy as np
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -91,7 +92,7 @@ class RolloutHook(ABC):
             log_prob=log_prob_np,
             next_obs=buffer_data["next_obs"],
             hidden_state=buffer_data["hidden_state"],
-            episode_start=done_np,
+            episode_start=np.atleast_1d(buffer_data["episode_start"]),
         )
 
     def on_episode_end(
@@ -148,22 +149,22 @@ class ICMHook(RolloutHook):
             step_data["last_obs_for_icm"] = obs
 
         # Calculate intrinsic reward with timing
-        with agent._timing_tracker.time_context("intrinsic_reward_calculation"):
+        with agent.timing_tracker.time_context("intrinsic_reward_calculation"):
             intrinsic_reward, _, _ = agent.get_intrinsic_reward(
-                action,
-                step_data.get("last_obs_for_icm"),
-                obs,
-                step_data.get("encoder_last_output"),
-                encoder_output,
-                step_data.get("current_hidden_state_for_buffer"),
-                agent.hidden_state if hasattr(agent, "hidden_state") else None,
+                action_batch=action,
+                obs_batch=step_data.get("last_obs_for_icm"),
+                next_obs_batch=next_obs,
+                embedded_obs=step_data.get("encoder_last_output"),
+                embedded_next_obs=encoder_output,
+                hidden_state_obs=step_data.get("current_hidden_state_for_buffer"),
+                hidden_state_next_obs=(
+                    agent.hidden_state if hasattr(agent, "hidden_state") else None
+                ),
             )
 
         # Combine extrinsic and intrinsic rewards
-        intrinsic_reward_weight = getattr(agent, "intrinsic_reward_weight", 0.0)
-        combined_reward = (
-            1 - intrinsic_reward_weight
-        ) * reward + intrinsic_reward.detach().cpu().numpy()
+        # ICM already applies intrinsic_reward_weight internally; just add it.
+        combined_reward = reward + intrinsic_reward.detach().cpu().numpy()
 
         return combined_reward
 
@@ -185,6 +186,7 @@ class ICMHook(RolloutHook):
             next_obs=buffer_data["next_obs"],
             hidden_state=buffer_data["hidden_state"],
             encoder_out=encoder_output_np,
+            episode_start=np.atleast_1d(buffer_data["episode_start"]),
         )
 
 
@@ -288,6 +290,7 @@ class CVARHook(RolloutHook):
             update=buffer_data["update"],
             next_obs=buffer_data["next_obs"],
             hidden_state=buffer_data["hidden_state"],
+            episode_start=buffer_data["episode_start"],
         )
 
     def on_episode_end(
@@ -361,8 +364,8 @@ def _collect_rollouts(
         )
 
     # Initialize timing tracker if not present
-    if not hasattr(agent, "_timing_tracker"):
-        agent._timing_tracker = TimingTracker()
+    if not hasattr(agent, "timing_tracker"):
+        agent.timing_tracker = TimingTracker()
 
     # Get appropriate hooks for this agent
     hooks = get_rollout_hooks(agent)
@@ -371,7 +374,7 @@ def _collect_rollouts(
     n_steps = n_steps or agent.learn_step
 
     # Use timing tracker context manager
-    with agent._timing_tracker.time_context("rollout_collection"):
+    with agent.timing_tracker.time_context("rollout_collection"):
         if reset_on_collect or (
             last_obs is None
             or last_done is None
@@ -390,9 +393,19 @@ def _collect_rollouts(
         else:
             # Continue from last state
             obs = last_obs
-            done = last_done
+            done = (
+                np.array(last_done, dtype=bool)
+                if last_done is not None
+                else np.zeros(agent.num_envs, dtype=bool)
+            )
             scores = last_scores
             info = last_info
+
+        # Initialize last_episode_starts
+        if reset_on_collect or last_done is None:
+            last_episode_starts = np.ones(agent.num_envs, dtype=bool)
+        else:
+            last_episode_starts = np.array(last_done, dtype=bool)
 
         agent.rollout_buffer.reset()
         current_hidden_state_for_actor = agent.hidden_state
@@ -503,11 +516,13 @@ def _collect_rollouts(
                 step_data,
             )
 
+            buffer_data["episode_start"] = last_episode_starts
             # Add to buffer through primary hook
             primary_hook.add_to_buffer(agent, buffer_data)
 
             scores += np.atleast_1d(processed_reward)
             done = np.atleast_1d(is_terminal)
+            done = done.astype(bool)
 
             if recurrent and np.any(done):
                 finished_mask = done.astype(bool)
@@ -520,9 +535,9 @@ def _collect_rollouts(
                             :, finished_mask, :
                         ]
                         if reset_states_for_key.shape[1] > 0:
-                            agent.hidden_state[key][
-                                :, finished_mask, :
-                            ] = reset_states_for_key
+                            agent.hidden_state[key][:, finished_mask, :] = (
+                                reset_states_for_key
+                            )
 
             # Handle episode endings through hooks
             for hook in hooks:
@@ -562,16 +577,17 @@ def _collect_rollouts(
 
             last_value = last_value.cpu().numpy()
             last_done = np.atleast_1d(term)
+            last_done = last_done.astype(bool)
 
         agent.rollout_buffer.compute_returns_and_advantages(
             last_value=last_value, last_done=last_done
         )
 
     # Update timing metrics using the timing tracker
-    agent.last_collection_time = agent._timing_tracker.get_average_time(
+    agent.last_collection_time = agent.timing_tracker.get_average_time(
         "rollout_collection"
     )
-    agent.total_collection_time = agent._timing_tracker.get_time("rollout_collection")
+    agent.total_collection_time = agent.timing_tracker.get_time("rollout_collection")
 
     return completed_episode_scores, obs, done, scores, info
 

@@ -19,13 +19,9 @@ from agilerl.networks import EvolvableNetwork, StochasticActor
 from agilerl.networks.value_networks import ValueNetwork
 from agilerl.typing import ArrayOrTensor, BPTTSequenceType, ExperiencesType, GymEnvType
 from agilerl.utils.algo_utils import (
-    flatten_experiences,
-    get_experiences_samples,
-    is_vectorized_experiences,
     make_safe_deepcopies,
     obs_channels_to_first,
     share_encoder_parameters,
-    stack_experiences,
 )
 from agilerl.utils.metrics import MetricsTracker, TimingTracker
 
@@ -150,63 +146,63 @@ class PPO(RLAlgorithm):
         assert isinstance(gamma, (float, int, torch.Tensor)), "Gamma must be a float."
         assert isinstance(gae_lambda, (float, int)), "Lambda must be a float."
         assert gae_lambda >= 0, "Lambda must be greater than or equal to zero."
-        assert isinstance(
-            action_std_init, (float, int)
-        ), "Action standard deviation must be a float."
-        assert (
-            action_std_init >= 0
-        ), "Action standard deviation must be greater than or equal to zero."
-        assert isinstance(
-            clip_coef, (float, int)
-        ), "Clipping coefficient must be a float."
-        assert (
-            clip_coef >= 0
-        ), "Clipping coefficient must be greater than or equal to zero."
-        assert isinstance(
-            ent_coef, (float, int)
-        ), "Entropy coefficient must be a float."
-        assert (
-            ent_coef >= 0
-        ), "Entropy coefficient must be greater than or equal to zero."
-        assert isinstance(
-            vf_coef, (float, int)
-        ), "Value function coefficient must be a float."
-        assert (
-            vf_coef >= 0
-        ), "Value function coefficient must be greater than or equal to zero."
-        assert isinstance(
-            max_grad_norm, (float, int)
-        ), "Maximum norm for gradient clipping must be a float."
-        assert (
-            max_grad_norm >= 0
-        ), "Maximum norm for gradient clipping must be greater than or equal to zero."
-        assert (
-            isinstance(target_kl, (float, int)) or target_kl is None
-        ), "Target KL divergence threshold must be a float."
+        assert isinstance(action_std_init, (float, int)), (
+            "Action standard deviation must be a float."
+        )
+        assert action_std_init >= 0, (
+            "Action standard deviation must be greater than or equal to zero."
+        )
+        assert isinstance(clip_coef, (float, int)), (
+            "Clipping coefficient must be a float."
+        )
+        assert clip_coef >= 0, (
+            "Clipping coefficient must be greater than or equal to zero."
+        )
+        assert isinstance(ent_coef, (float, int)), (
+            "Entropy coefficient must be a float."
+        )
+        assert ent_coef >= 0, (
+            "Entropy coefficient must be greater than or equal to zero."
+        )
+        assert isinstance(vf_coef, (float, int)), (
+            "Value function coefficient must be a float."
+        )
+        assert vf_coef >= 0, (
+            "Value function coefficient must be greater than or equal to zero."
+        )
+        assert isinstance(max_grad_norm, (float, int)), (
+            "Maximum norm for gradient clipping must be a float."
+        )
+        assert max_grad_norm >= 0, (
+            "Maximum norm for gradient clipping must be greater than or equal to zero."
+        )
+        assert isinstance(target_kl, (float, int)) or target_kl is None, (
+            "Target KL divergence threshold must be a float."
+        )
         if target_kl is not None:
-            assert (
-                target_kl >= 0
-            ), "Target KL divergence threshold must be greater than or equal to zero."
-        assert isinstance(
-            update_epochs, int
-        ), "Policy update epochs must be an integer."
-        assert (
-            update_epochs >= 1
-        ), "Policy update epochs must be greater than or equal to one."
-        assert isinstance(
-            wrap, bool
-        ), "Wrap models flag must be boolean value True or False."
+            assert target_kl >= 0, (
+                "Target KL divergence threshold must be greater than or equal to zero."
+            )
+        assert isinstance(update_epochs, int), (
+            "Policy update epochs must be an integer."
+        )
+        assert update_epochs >= 1, (
+            "Policy update epochs must be greater than or equal to one."
+        )
+        assert isinstance(wrap, bool), (
+            "Wrap models flag must be boolean value True or False."
+        )
 
         # New parameters for using RolloutBuffer
-        assert isinstance(
-            use_rollout_buffer, bool
-        ), "Use rollout buffer flag must be boolean value True or False."
-        assert isinstance(
-            recurrent, bool
-        ), "Has hidden states flag must be boolean value True or False."
-        assert isinstance(
-            bptt_sequence_type, BPTTSequenceType
-        ), "bptt_sequence_type must be a BPTTSequenceType enum value."
+        assert isinstance(use_rollout_buffer, bool), (
+            "Use rollout buffer flag must be boolean value True or False."
+        )
+        assert isinstance(recurrent, bool), (
+            "Has hidden states flag must be boolean value True or False."
+        )
+        assert isinstance(bptt_sequence_type, BPTTSequenceType), (
+            "bptt_sequence_type must be a BPTTSequenceType enum value."
+        )
 
         if not use_rollout_buffer:
             warnings.warn(
@@ -590,6 +586,127 @@ class PPO(RLAlgorithm):
                 values_np,
             )
 
+    def compute_loss(
+        self,
+        obs,
+        actions,
+        old_log_probs,
+        advantages,
+        returns,
+        hidden_state=None,
+        old_values=None,
+        learn_by_bptt=False,
+        seq_len=None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Compute the loss for the actor and critic networks."""
+        action_mask = kwargs.get("action_mask", None)  # optional
+        if learn_by_bptt:
+            if seq_len is None:
+                seq_len = self.max_seq_len
+            # ---- Features / values for the whole sequence (do NOT resample actions) ----
+            # (we ignore returned sampled actions/log_probs)
+            _, _, entropies, features_seq, _ = self.actor.sequence_forward(
+                obs, hidden_state, action_mask=action_mask
+            )
+            # Values from critic
+            if self.share_encoders:
+                new_values = self.critic.forward_head(features_seq).squeeze(-1)  # [B,T]
+            else:
+                new_values, _ = self.critic.sequence_forward(obs, hidden_state)
+                new_values = new_values.squeeze(-1)  # [B,T]
+            B, T = features_seq.shape[:2]
+            flat_feat = features_seq.reshape(B * T, -1)
+            # Flatten actions (and mask if provided) to match latent
+            flat_act = actions.reshape(B * T, -1)
+            flat_mask = (
+                action_mask.reshape(B * T, -1) if action_mask is not None else None
+            )
+            # ---- Log-prob of BUFFER actions under CURRENT policy ----
+            new_log_probs = self.actor.head_net.log_prob_from_latent(
+                flat_feat, flat_act, action_mask=flat_mask
+            ).view(B, T)
+            # ---- PPO clipped objective ----
+            log_ratio = new_log_probs - old_log_probs  # [B,T]
+            ratio = torch.exp(log_ratio)
+            policy_loss1 = -advantages * ratio
+            policy_loss2 = -advantages * torch.clamp(
+                ratio, 1 - self.clip_coef, 1 + self.clip_coef
+            )
+            policy_loss = torch.max(policy_loss1, policy_loss2).mean()
+            # Value loss (clip against old_values if provided; shapes [B,T])
+            if old_values is not None:
+                v_loss_unclipped = (new_values - returns) ** 2
+                v_clipped = old_values + torch.clamp(
+                    new_values - old_values, -self.clip_coef, self.clip_coef
+                )
+                v_loss_clipped = (v_clipped - returns) ** 2
+                value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+            else:
+                value_loss = 0.5 * ((new_values - returns) ** 2).mean()
+            # Entropy: use analytic entropies if available, else fallback to -log_prob mean
+            if entropies is None:
+                entropy_loss = -new_log_probs.mean()
+            else:
+                entropy_loss = -entropies.mean()
+            loss = (
+                policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss
+            )
+            with torch.no_grad():
+                approx_kl = ((ratio - 1) - log_ratio).mean().item()
+                clip_fraction = (
+                    (torch.abs(ratio - 1.0) > self.clip_coef).float().mean().item()
+                )
+            return {
+                "loss": loss,
+                "policy_loss": policy_loss,
+                "value_loss": value_loss,
+                "entropy_loss": entropy_loss,
+                "approx_kl": approx_kl,
+                "clip_fraction": clip_fraction,
+            }
+        # ---------------------- FLAT (non-BPTT) path ----------------------
+        # Get values/entropy (no sampling) and the latent features
+        _, _, entropy_t, new_value_t, _ = self._get_action_and_values(
+            obs, action_mask=action_mask, hidden_state=hidden_state, sample=False
+        )
+        # Log-prob of buffer actions under CURRENT policy
+        new_log_prob_t = self.actor.action_log_prob(actions)
+        # Entropy fallback for squashed Box
+        if entropy_t is None:
+            entropy_t = -new_log_prob_t
+        ratio = torch.exp(new_log_prob_t - old_log_probs)
+        policy_loss1 = -advantages * ratio
+        policy_loss2 = -advantages * torch.clamp(
+            ratio, 1 - self.clip_coef, 1 + self.clip_coef
+        )
+        policy_loss = torch.max(policy_loss1, policy_loss2).mean()
+        if old_values is not None:
+            v_loss_unclipped = (new_value_t.squeeze() - returns) ** 2
+            v_clipped = old_values + torch.clamp(
+                new_value_t.squeeze() - old_values, -self.clip_coef, self.clip_coef
+            )
+            v_loss_clipped = (v_clipped - returns) ** 2
+            value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+        else:
+            value_loss = 0.5 * ((new_value_t.squeeze() - returns) ** 2).mean()
+        entropy_loss = -entropy_t.mean()
+        loss = policy_loss + self.vf_coef * value_loss + self.ent_coef * entropy_loss
+        with torch.no_grad():
+            log_ratio = new_log_prob_t - old_log_probs
+            approx_kl = ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
+            clip_fraction = (
+                (torch.abs(ratio - 1.0) > self.clip_coef).float().mean().item()
+            )
+        return {
+            "loss": loss,
+            "policy_loss": policy_loss,
+            "value_loss": value_loss,
+            "entropy_loss": entropy_loss,
+            "approx_kl": approx_kl,
+            "clip_fraction": clip_fraction,
+        }
+
     def learn(self, experiences: Optional[ExperiencesType] = None) -> Dict[str, float]:
         """Updates agent network parameters to learn from experiences.
 
@@ -721,49 +838,18 @@ class PPO(RLAlgorithm):
                             "Recurrent policy, but no hidden_states found in minibatch_td for flat learning."
                         )
 
-                with self.timing_tracker.time_context("forward_pass_time"):
-                    _, _, entropy_t, new_value_t, _ = self._get_action_and_values(
-                        mb_obs,
-                        hidden_state=eval_hidden_state,
-                        sample=False,  # No sampling during evaluation for loss calculation
-                    )
-                    new_log_prob_t = self.actor.action_log_prob(mb_actions)
-
-                if entropy_t is None:  # For continuous squashed actions
-                    entropy_t = -new_log_prob_t
-
                 with self.timing_tracker.time_context("loss_calculation_time"):
-                    ratio = torch.exp(new_log_prob_t - mb_old_log_probs)
-                    policy_loss1 = -mb_advantages * ratio
-                    policy_loss2 = -mb_advantages * torch.clamp(
-                        ratio, 1 - self.clip_coef, 1 + self.clip_coef
+                    loss_dict = self.compute_loss(
+                        mb_obs,
+                        mb_actions,
+                        mb_old_log_probs,
+                        mb_advantages,
+                        mb_returns,
+                        hidden_state=eval_hidden_state,
+                        old_values=mb_old_values,
+                        learn_by_bptt=False,
                     )
-                    policy_loss = torch.max(policy_loss1, policy_loss2).mean()
-
-                    # Change to clipped value loss
-                    v_loss_unclipped = (new_value_t - mb_returns) ** 2
-                    v_clipped = mb_old_values + torch.clamp(
-                        new_value_t - mb_old_values, -self.clip_coef, self.clip_coef
-                    )
-                    v_loss_clipped = (v_clipped - mb_returns) ** 2
-                    value_loss = (
-                        0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
-                    )
-
-                    entropy_loss = -entropy_t.mean()
-
-                    loss = (
-                        policy_loss
-                        + self.vf_coef * value_loss
-                        + self.ent_coef * entropy_loss
-                    )
-
-                with torch.no_grad():
-                    log_ratio = new_log_prob_t - mb_old_log_probs
-                    approx_kl = ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
-                    clipfrac = torch.mean(
-                        (torch.abs(ratio - 1.0) > self.clip_coef).float()
-                    ).item()
+                loss = loss_dict["loss"]
 
                 with self.timing_tracker.time_context("backward_pass_time"):
                     self.optimizer.zero_grad()
@@ -773,12 +859,12 @@ class PPO(RLAlgorithm):
                     self.optimizer.step()
 
                 # Track metrics
-                self.learn_metrics.add("total_loss", loss.item())
-                self.learn_metrics.add("policy_loss", policy_loss.item())
-                self.learn_metrics.add("value_loss", value_loss.item())
-                self.learn_metrics.add("entropy_loss", entropy_loss.item())
-                self.learn_metrics.add("approx_kl", approx_kl)
-                self.learn_metrics.add("clip_fraction", clipfrac)
+                self.learn_metrics.add("total_loss", loss_dict["loss"].item())
+                self.learn_metrics.add("policy_loss", loss_dict["policy_loss"].item())
+                self.learn_metrics.add("value_loss", loss_dict["value_loss"].item())
+                self.learn_metrics.add("entropy_loss", loss_dict["entropy_loss"].item())
+                self.learn_metrics.add("approx_kl", loss_dict["approx_kl"])
+                self.learn_metrics.add("clip_fraction", loss_dict["clip_fraction"])
 
                 num_minibatches_this_epoch += 1
 
@@ -876,7 +962,6 @@ class PPO(RLAlgorithm):
         )  # Here, batch_size means number of sequences per minibatch
 
         for epoch in range(self.update_epochs):
-            approx_kl_divs_epoch = []  # KL divergences for this epoch's minibatches
             np.random.shuffle(all_start_coords)
             num_minibatches_this_epoch = 0
 
@@ -932,12 +1017,9 @@ class PPO(RLAlgorithm):
                     "initial_hidden_states", default=None
                 )
 
-                policy_loss_total, value_loss_total, entropy_loss_total = 0.0, 0.0, 0.0
                 current_step_hidden_state_actor = (
                     None  # For actor: {key: (layers, batch_seq_size, hidden_size)}
                 )
-                approx_kl_divs_minibatch_timesteps = []
-                clipfrac_sum = 0.0
 
                 if self.recurrent and mb_initial_hidden_states_dict is not None:
                     current_step_hidden_state_actor = {
@@ -946,161 +1028,46 @@ class PPO(RLAlgorithm):
                         for key, val in mb_initial_hidden_states_dict.items()
                     }
 
-                with self.timing_tracker.time_context("bptt_forward_pass_time"):
-                    for t in range(seq_len):
-                        obs_t = (
-                            mb_obs_seq[:, t]
-                            if not isinstance(mb_obs_seq, TensorDict)
-                            else mb_obs_seq[:, t]
-                        )
-                        actions_t, old_log_prob_t = (
-                            mb_actions_seq[:, t],
-                            mb_old_log_probs_seq[:, t],
-                        )
-                        adv_t, return_t = mb_advantages_seq[:, t], mb_returns_seq[:, t]
-
-                        (
-                            _,
-                            _,
-                            entropy_t,
-                            new_value_t,
-                            next_hidden_state_for_actor_step,
-                        ) = self._get_action_and_values(
-                            obs_t,
-                            hidden_state=current_step_hidden_state_actor,
-                            sample=False,
-                        )  # new_value_t: (batch_seq,), entropy_t: (batch_seq,) or scalar
-
-                        new_log_prob_t = self.actor.action_log_prob(
-                            actions_t
-                        )  # Shape: (batch_seq,)
-                        entropy_t = (
-                            (-new_log_prob_t.mean())
-                            if entropy_t is None
-                            else entropy_t.mean()
-                        )  # Ensure scalar
-
-                        ratio = torch.exp(new_log_prob_t - old_log_prob_t)
-                        policy_loss1 = -adv_t * ratio
-                        policy_loss2 = -adv_t * torch.clamp(
-                            ratio, 1 - self.clip_coef, 1 + self.clip_coef
-                        )
-                        policy_loss_total += torch.max(
-                            policy_loss1, policy_loss2
-                        ).mean()
-
-                        # Change to clipped value loss accumulation
-                        old_value_t = mb_old_values_seq[:, t]
-                        v_loss_unclipped = (new_value_t - return_t) ** 2
-                        v_clipped = old_value_t + torch.clamp(
-                            new_value_t - old_value_t, -self.clip_coef, self.clip_coef
-                        )
-                        v_loss_clipped = (v_clipped - return_t) ** 2
-                        value_loss_total += (
-                            0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
-                        )
-                        entropy_loss_total += -entropy_t  # entropy_t is already mean
-
-                        with torch.no_grad():
-                            log_ratio = new_log_prob_t - old_log_prob_t
-                            approx_kl_divs_minibatch_timesteps.append(
-                                ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
-                            )
-                            # Compute clip fraction
-                            clipfrac = torch.mean(
-                                (torch.abs(ratio - 1.0) > self.clip_coef).float()
-                            ).item()
-                            clipfrac_sum += clipfrac
-
-                        if (
-                            self.recurrent
-                            and next_hidden_state_for_actor_step is not None
-                        ):
-                            current_step_hidden_state_actor = (
-                                next_hidden_state_for_actor_step
-                            )
-
                 with self.timing_tracker.time_context("bptt_loss_calculation_time"):
-                    loss = (
-                        policy_loss_total / seq_len
-                        + self.vf_coef * (value_loss_total / seq_len)
-                        + self.ent_coef * (entropy_loss_total / seq_len)
+                    loss_dict = self.compute_loss(
+                        mb_obs_seq,
+                        mb_actions_seq,
+                        mb_old_log_probs_seq,
+                        mb_advantages_seq,
+                        mb_returns_seq,
+                        hidden_state=current_step_hidden_state_actor,
+                        old_values=mb_old_values_seq,
+                        learn_by_bptt=True,
+                        seq_len=seq_len,
                     )
+                loss = loss_dict["loss"]
 
                 with self.timing_tracker.time_context("bptt_backward_pass_time"):
                     self.optimizer.zero_grad()
-                    loss.backward()
+                    loss.backward()  # Gradients accumulate over the sequence within this backward call
                     clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                     clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
                     self.optimizer.step()
 
                 # Track metrics for this minibatch
-                self.learn_metrics.add("total_loss", loss.item())
-                self.learn_metrics.add(
-                    "policy_loss", (policy_loss_total / seq_len).item()
-                )
-                self.learn_metrics.add(
-                    "value_loss", (value_loss_total / seq_len).item()
-                )
-                self.learn_metrics.add(
-                    "entropy_loss", (entropy_loss_total / seq_len).item()
-                )
-                self.learn_metrics.add(
-                    "approx_kl",
-                    (
-                        np.mean(approx_kl_divs_minibatch_timesteps)
-                        if approx_kl_divs_minibatch_timesteps
-                        else 0.0
-                    ),
-                )
-                self.learn_metrics.add(
-                    "clip_fraction", clipfrac_sum / seq_len if seq_len > 0 else 0.0
-                )
+                self.learn_metrics.add("total_loss", loss_dict["loss"].item())
+                self.learn_metrics.add("policy_loss", loss_dict["policy_loss"].item())
+                self.learn_metrics.add("value_loss", loss_dict["value_loss"].item())
+                self.learn_metrics.add("entropy_loss", loss_dict["entropy_loss"].item())
+                self.learn_metrics.add("approx_kl", loss_dict["approx_kl"])
+                self.learn_metrics.add("clip_fraction", loss_dict["clip_fraction"])
 
                 num_minibatches_this_epoch += 1
 
                 if (
                     self.target_kl is not None
-                    and len(approx_kl_divs_minibatch_timesteps) > 0
-                ):
-                    # Average KL over all timesteps in this minibatch of sequences
-                    kl_for_current_minibatch = np.mean(
-                        approx_kl_divs_minibatch_timesteps
-                    )
-                    approx_kl_divs_epoch.append(
-                        kl_for_current_minibatch
-                    )  # Store minibatch average KL
-
-                    if kl_for_current_minibatch > self.target_kl:
-                        warnings.warn(
-                            f"Epoch {epoch}, Minibatch: KL divergence {kl_for_current_minibatch:.4f} exceeded target {self.target_kl}. Stopping update for this epoch."
-                        )
-                        break  # Break from minibatch loop for this epoch
-
-            # Check average KL for the epoch if target_kl is set and the inner loop wasn't broken by KL
-            if self.target_kl is not None and len(approx_kl_divs_epoch) > 0:
-                avg_kl_this_epoch = np.mean(approx_kl_divs_epoch)
-                if (
-                    avg_kl_this_epoch > self.target_kl
-                    and not (  # Ensure this wasn't the break from inner loop
-                        len(approx_kl_divs_minibatch_timesteps) > 0
-                        and np.mean(approx_kl_divs_minibatch_timesteps) > self.target_kl
-                    )
+                    and self.learn_metrics.get_count("approx_kl") > 0
+                    and self.learn_metrics.get_average("approx_kl") > self.target_kl
                 ):
                     warnings.warn(
-                        f"Epoch {epoch}: Average KL divergence {avg_kl_this_epoch:.4f} exceeded target {self.target_kl} after completing epoch. Consider adjusting learning rate or target_kl."
+                        f"Minibatch: KL divergence {self.learn_metrics.get_average('approx_kl'):.4f} exceeded target {self.target_kl}. Stopping update for this epoch."
                     )
-                    # This break is for the epoch loop if KL was exceeded on average for the epoch
-                    # but not necessarily in the last minibatch that would have broken the inner loop.
-                    break
-
-            # If inner loop broke due to KL, this outer break also executes
-            if (
-                self.target_kl is not None
-                and len(approx_kl_divs_minibatch_timesteps) > 0
-                and np.mean(approx_kl_divs_minibatch_timesteps) > self.target_kl
-            ):
-                break
+                    break  # Break from minibatch loop for this epoch
 
     def add_collection_time(self, collection_time: float) -> None:
         """Add collection time to metrics tracker.
@@ -1245,9 +1212,9 @@ class PPO(RLAlgorithm):
                                     :, newly_finished, :
                                 ]
                                 if reset_states.shape[1] > 0:
-                                    test_hidden_state[key][
-                                        :, newly_finished, :
-                                    ] = reset_states
+                                    test_hidden_state[key][:, newly_finished, :] = (
+                                        reset_states
+                                    )
 
                     if np.any(newly_finished):
                         completed_episode_scores[newly_finished] = scores[

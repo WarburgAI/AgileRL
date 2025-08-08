@@ -118,7 +118,10 @@ class BPTTSequenceType(Enum):
     MAXIMUM generates all possible overlapping sequences, which is the most memory-intensive option.
         The number of sequences generated is then:  (num_steps - max_seq_len + 1) * num_envs
     FIFTY_PERCENT_OVERLAP generates sequences with 50% overlap, which is a compromise between the two.
-        The number of sequences generated is then:  (num_steps / max_seq_len * 2) * num_envs
+        The number of sequences generated is then:  (num_steps / max_seq_len * 2 - 1) * num_envs
+        This means that the processing impact starts at 33% more than CHUNKED with 2 sequences,
+        but then increases to 66% asymptotically as the number of sequences increases.
+        This is useful to create "burn-in" sequences for PBTT.
     """
 
     CHUNKED = "chunked"  # Generate sequences by non-overlapping chunks

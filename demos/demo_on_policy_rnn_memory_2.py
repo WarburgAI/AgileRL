@@ -13,6 +13,7 @@ from tqdm import trange
 
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.rollouts.on_policy import collect_rollouts_recurrent
 from agilerl.utils.utils import create_population
 
 
@@ -140,6 +141,8 @@ INIT_HP = {
     "ACTION_STD_INIT": 0.6,
     "TARGET_KL": None,
     "CHANNELS_LAST": False,
+    "RECURRENT": recurrent,
+    "USE_ROLLOUT_BUFFER": True,
 }
 
 
@@ -165,7 +168,6 @@ pop = create_population(
     population_size=INIT_HP["POP_SIZE"],
     num_envs=num_envs,
     device=device,
-    algo_kwargs={"use_rollout_buffer": True, "recurrent": recurrent},
 )
 
 # --- Setup Evolution Components ---
@@ -207,7 +209,7 @@ while (
     and not training_complete
 ):
     for agent in pop:
-        agent.collect_rollouts(env)
+        collect_rollouts_recurrent(agent, env)
         agent.learn()
         total_steps += agent.learn_step * num_envs
         agent.steps[-1] += agent.learn_step

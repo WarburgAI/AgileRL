@@ -58,21 +58,21 @@ class EvolvableLSTM(EvolvableModule):
     ):
         super().__init__(device, random_seed)
 
-        assert (
-            input_size > 0
-        ), "'input_size' cannot be less than or equal to zero, please enter a valid integer."
-        assert (
-            hidden_state_size > 0
-        ), "'hidden_state_size' cannot be less than or equal to zero, please enter a valid integer."
-        assert (
-            num_outputs > 0
-        ), "'num_outputs' cannot be less than or equal to zero, please enter a valid integer."
-        assert (
-            num_layers > 0
-        ), "'num_layers' cannot be less than or equal to zero, please enter a valid integer."
-        assert (
-            min_hidden_state_size < max_hidden_state_size
-        ), "'min_hidden_state_size' must be less than 'max_hidden_state_size'."
+        assert input_size > 0, (
+            "'input_size' cannot be less than or equal to zero, please enter a valid integer."
+        )
+        assert hidden_state_size > 0, (
+            "'hidden_state_size' cannot be less than or equal to zero, please enter a valid integer."
+        )
+        assert num_outputs > 0, (
+            "'num_outputs' cannot be less than or equal to zero, please enter a valid integer."
+        )
+        assert num_layers > 0, (
+            "'num_layers' cannot be less than or equal to zero, please enter a valid integer."
+        )
+        assert min_hidden_state_size < max_hidden_state_size, (
+            "'min_hidden_state_size' must be less than 'max_hidden_state_size'."
+        )
         assert min_layers < max_layers, "'min_layers' must be less than 'max_layers'."
         assert 0 <= dropout < 1, "'dropout' must be between 0 and 1."
 
@@ -175,35 +175,73 @@ class EvolvableLSTM(EvolvableModule):
         if not isinstance(x, torch.Tensor):
             x = torch.tensor(x, dtype=torch.float32, device=self.device)
 
-        # If input is 2D (batch_size, features), add sequence length dimension
-        if x.dim() == 2:
-            # Reshape to (batch_size, seq_len=1, features)
-            x = x.unsqueeze(1)
+        # Handle both 2D (batch, features) and 3D (batch, seq_len, features) inputs
+        is_sequence = len(x.shape) == 3
+        if not is_sequence:
+            # Convert 2D input to 3D with seq_len=1
+            x = x.unsqueeze(1)  # (batch, features) -> (batch, 1, features)
         elif x.dim() != 3:
             raise ValueError(
                 f"Expected 2D (batch_size, features) or 3D (batch_size, seq_len, features) input, but got {x.dim()}D"
             )
 
-        # Use provided hidden state if available
-        if hidden_state is not None:
+        batch_size = x.shape[0]
+
+        # Initialize hidden state if not provided
+        if hidden_state is None:
+            h0 = torch.zeros(
+                self.num_layers, batch_size, self.hidden_state_size, device=self.device
+            )
+            c0 = torch.zeros(
+                self.num_layers, batch_size, self.hidden_state_size, device=self.device
+            )
+        else:
             h0 = hidden_state.get(f"{self.name}_h", None)
             c0 = hidden_state.get(f"{self.name}_c", None)
 
-            lstm_output, (h_n, c_n) = self.model[f"{self.name}_lstm"](x, (h0, c0))
-        else:
-            raise ValueError("Hidden state is required for LSTM forward pass.")
+            if h0 is None or c0 is None:
+                h0 = torch.zeros(
+                    self.num_layers,
+                    batch_size,
+                    self.hidden_state_size,
+                    device=self.device,
+                )
+                c0 = torch.zeros(
+                    self.num_layers,
+                    batch_size,
+                    self.hidden_state_size,
+                    device=self.device,
+                )
 
-        # Process output
-        lstm_output = self.model[f"{self.name}_lstm_output"](lstm_output[:, -1, :])
-        lstm_output = self.model[f"{self.name}_output_activation"](lstm_output)
+        # LSTM forward pass
+        lstm_output, (h_n, c_n) = self.model[f"{self.name}_lstm"](x, (h0, c0))
+
+        # For sequence processing, we want to return outputs for all timesteps
+        if is_sequence:
+            # Apply output layer to all timesteps
+            seq_len = lstm_output.shape[1]
+            # Flatten to apply linear layer, then reshape back
+            lstm_output_flat = lstm_output.reshape(batch_size * seq_len, -1)
+            output_flat = self.model[f"{self.name}_lstm_output"](lstm_output_flat)
+            output_flat = self.model[f"{self.name}_output_activation"](output_flat)
+            output = output_flat.reshape(batch_size, seq_len, -1)
+        else:
+            # For single timestep, use only the last output
+            output = self.model[f"{self.name}_lstm_output"](lstm_output[:, -1, :])
+            output = self.model[f"{self.name}_output_activation"](output)
 
         # Return output and new hidden state
         next_hidden = {
-            **hidden_state,
+            **(hidden_state if hidden_state is not None else {}),
             f"{self.name}_h": h_n,
             f"{self.name}_c": c_n,
         }
-        return lstm_output, next_hidden
+
+        # If input was 2D, squeeze out the sequence dimension from output
+        if not is_sequence:
+            output = output.squeeze(1) if output.dim() == 3 else output
+
+        return output, next_hidden
 
     def get_output_dense(self) -> torch.nn.Module:
         """Returns output layer of neural network."""

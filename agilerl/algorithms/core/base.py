@@ -854,7 +854,9 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             pickle_module=dill,
         )
 
-    def load_checkpoint(self, path: str, ignore_attributes: List[str] = []) -> None:
+    def load_checkpoint(
+        self, path: str, ignore_attributes: List[str] = [], strict=True
+    ) -> None:
         """Loads saved agent properties and network weights from checkpoint.
 
         :param path: Location to load checkpoint from
@@ -904,10 +906,10 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             if isinstance(loaded_module, ModuleDict):
                 for agent_id, mod in loaded_module.items():
                     if state_dict[agent_id]:
-                        mod.load_state_dict(state_dict[agent_id])
+                        mod.load_state_dict(state_dict[agent_id], strict=strict)
 
             elif state_dict:
-                loaded_module.load_state_dict(state_dict)
+                loaded_module.load_state_dict(state_dict, strict=strict)
 
         optimizer_names = network_info["optimizer_names"]
         for name in optimizer_names:
@@ -950,10 +952,13 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         # Load other attributes
         checkpoint.pop("network_info")
-        for attribute in checkpoint.keys():
-            if attribute in ignore_attributes or attribute == "device":
-                continue
-            setattr(self, attribute, checkpoint[attribute])
+        if "*" not in ignore_attributes:
+            for attribute in checkpoint.keys():
+                if attribute in ignore_attributes or attribute == "device":
+                    continue
+                setattr(self, attribute, checkpoint[attribute])
+        else:
+            print("Ignoring all attributes for checkpoint loading")
 
         # Wrap models / compile if necessary
         if self.accelerator is not None:

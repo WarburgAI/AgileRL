@@ -215,23 +215,22 @@ class ICMFeatureEncoder(EvolvableModule):
         if self.arch == "mlp":
             obs = obs.reshape(obs.size(0), -1)
         elif self.arch == "cnn":
-            # Ensure obs is channels-first for EvolvableCNN if not using normalize_inputs
-            # If normalize_inputs=True in EvolvableCNN, it handles HWC internally.
-            # Otherwise, input here should be BCHW.
-            if not self.base_encoder.normalize_inputs:  # type: ignore
-                if (
-                    obs.dim() == 3
-                ):  # B,H,W (assuming C=1) or H,W,C - needs to be B,C,H,W
-                    # This part is tricky without knowing exact input format vs. base_encoder expectations
-                    pass  # Assume preprocessor handles this to B,C,H,W if normalize_inputs=False
-                if (
-                    obs.dim() == 4 and obs.size(3) == self.input_shape[0]
-                ):  # B,H,W,C -> B,C,H,W
-                    obs = obs.permute(0, 3, 1, 2)
-                elif (
-                    obs.dim() == 3 and obs.size(2) == self.input_shape[0]
-                ):  # B,H,W,C -> B,C,H,W (when C=1,3,4)
-                    obs = obs.permute(0, 2, 0, 1)
+            # Expect BCHW for EvolvableCNN unless it internally normalizes HWC
+            if obs.dim() == 4:
+                # If BHWC (last dim = channels), convert to BCHW
+                if obs.size(-1) in (1, 3, 4) and obs.size(1) not in (1, 3, 4):
+                    obs = obs.permute(0, 3, 1, 2).contiguous()
+                # else assume already BCHW
+            elif obs.dim() == 3:
+                # Add batch dimension and assume HWC then convert
+                if obs.size(-1) in (1, 3, 4):
+                    obs = obs.permute(2, 0, 1).unsqueeze(0).contiguous()  # -> 1,C,H,W
+                else:
+                    raise ValueError(
+                        "3D obs for CNN must be HWC; got shape {}".format(
+                            tuple(obs.shape)
+                        )
+                    )
 
         features = self.base_encoder(obs)
         next_hidden_state = None
@@ -260,9 +259,7 @@ class ICMFeatureEncoder(EvolvableModule):
         return init_dict
 
     def get_output_dim(self):
-        return (
-            self.output_dim
-        )  # Required by EvolvableModule if not using `num_outputs` directly in constructor
+        return self.output_dim  # Required by EvolvableModule if not using `num_outputs` directly in constructor
 
     def clone(self):
         """Returns a deep copy of the module."""
@@ -484,6 +481,10 @@ class ICM(EvolvableModule):
         self.accelerator = accelerator
         self.use_internal_encoder = use_internal_encoder
 
+        self.register_buffer("ri_mean", torch.zeros(1, device=device))
+        self.register_buffer("ri_var", torch.ones(1, device=device))
+        self.ri_momentum = 0.999  # EMA
+
         if not isinstance(
             action_space, (spaces.Discrete, spaces.MultiDiscrete, spaces.Box)
         ):
@@ -614,14 +615,13 @@ class ICM(EvolvableModule):
             obs_batch_t = self._to_tensor(obs_batch)  # Default to float32
             next_obs_batch_t = self._to_tensor(next_obs_batch)  # Default to float32
 
-            with torch.no_grad():
-                phi_obs, hidden_state_t = self.encoder(
-                    obs_batch_t, hidden_state_obs if self.is_recurrent else None
-                )
-                phi_next_obs, next_hidden_state_t = self.encoder(
-                    next_obs_batch_t,
-                    hidden_state_next_obs if self.is_recurrent else None,
-                )
+            phi_obs, hidden_state_t = self.encoder(
+                obs_batch_t, hidden_state_obs if self.is_recurrent else None
+            )
+            phi_next_obs, next_hidden_state_t = self.encoder(
+                next_obs_batch_t,
+                hidden_state_next_obs if self.is_recurrent else None,
+            )
 
         return (
             phi_obs,
@@ -644,30 +644,48 @@ class ICM(EvolvableModule):
         Optional[Tuple[torch.Tensor, torch.Tensor]],
         Optional[Tuple[torch.Tensor, torch.Tensor]],
     ]:
-        phi_obs, phi_next_obs, hidden_state, next_hidden_state = self.embed_obs(
-            obs_batch,
-            next_obs_batch,
-            embedded_obs,
-            embedded_next_obs,
-            hidden_state_obs,
-            hidden_state_next_obs,
-        )
-
-        # Use appropriate dtype based on action space type
-        dtype = torch.float32 if self.is_continuous_action else torch.long
-        action_batch_t = self._to_tensor(action_batch, dtype=dtype)
-        action_input = actions_to_one_hot(action_batch_t, self.action_space)
-
         with torch.no_grad():
+            phi_obs, phi_next_obs, hidden_state, next_hidden_state = self.embed_obs(
+                obs_batch,
+                next_obs_batch,
+                embedded_obs,
+                embedded_next_obs,
+                hidden_state_obs,
+                hidden_state_next_obs,
+            )
+
+            phi_obs = phi_obs / (phi_obs.norm(p=2, dim=-1, keepdim=True) + 1e-8)
+            phi_next_obs = phi_next_obs / (
+                phi_next_obs.norm(p=2, dim=-1, keepdim=True) + 1e-8
+            )
+
+            # Use appropriate dtype based on action space type
+            dtype = torch.float32 if self.is_continuous_action else torch.long
+            action_batch_t = self._to_tensor(action_batch, dtype=dtype)
+            action_input = actions_to_one_hot(action_batch_t, self.action_space)
+
             pred_phi_next_obs = self.forward_model(phi_obs, action_input)
 
-        mse_per_feature = self.mse_loss_fn(pred_phi_next_obs, phi_next_obs)
-        intrinsic_reward = 0.5 * mse_per_feature.sum(dim=1)
-        intrinsic_reward *= self.intrinsic_reward_weight
+            mse_per_feature = self.mse_loss_fn(pred_phi_next_obs, phi_next_obs)
+            r_i_raw = 0.5 * mse_per_feature.sum(dim=1)
+            self._update_intrinsic_stats(r_i_raw)
+            r_i = self.standardize_intrinsic(r_i_raw) * self.intrinsic_reward_weight
 
-        returned_hidden_obs = hidden_state if self.is_recurrent else None
-        returned_hidden_next_obs = next_hidden_state if self.is_recurrent else None
-        return intrinsic_reward, returned_hidden_obs, returned_hidden_next_obs
+            returned_hidden_obs = hidden_state if self.is_recurrent else None
+            returned_hidden_next_obs = next_hidden_state if self.is_recurrent else None
+            return r_i, returned_hidden_obs, returned_hidden_next_obs
+
+    def _update_intrinsic_stats(self, r_i_raw):
+        # r_i_raw: (B,)
+        with torch.no_grad():
+            mean = r_i_raw.mean()
+            var = r_i_raw.var(unbiased=False) + 1e-8
+            self.ri_mean.mul_(self.ri_momentum).add_((1 - self.ri_momentum) * mean)
+            self.ri_var.mul_(self.ri_momentum).add_((1 - self.ri_momentum) * var)
+
+    def standardize_intrinsic(self, r_i_raw):
+        r = (r_i_raw - self.ri_mean) / (self.ri_var.sqrt() + 1e-8)
+        return torch.clamp(r, max=3.0)
 
     def update(
         self,
@@ -694,12 +712,12 @@ class ICM(EvolvableModule):
 
         total_loss, loss_I, loss_F, returned_hidden_obs, returned_hidden_next_obs = (
             self.compute_loss(
-                obs_batch_t,
-                action_batch_t,
-                next_obs_batch_t,
-                hidden_state_obs,
-                hidden_state_next_obs,
-                action_input,
+                obs_batch_t=obs_batch_t,
+                action_batch_t=action_batch_t,
+                next_obs_batch_t=next_obs_batch_t,
+                hidden_state_obs=hidden_state_obs,
+                hidden_state_next_obs=hidden_state_next_obs,
+                action_input=action_input,
             )
         )
 
@@ -770,6 +788,11 @@ class ICM(EvolvableModule):
             embedded_next_obs,
             hidden_state,
             hidden_state_next,
+        )
+
+        phi_obs = phi_obs / (phi_obs.norm(p=2, dim=-1, keepdim=True) + 1e-8)
+        phi_next_obs = phi_next_obs / (
+            phi_next_obs.norm(p=2, dim=-1, keepdim=True) + 1e-8
         )
 
         # === Inverse Model Loss (L_I) ===
