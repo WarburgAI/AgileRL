@@ -642,9 +642,19 @@ class PPO(RLAlgorithm):
         if learn_by_bptt:
             if seq_len is None:
                 seq_len = self.max_seq_len
-            # Preprocess observations for consistency
-            if isinstance(obs, (dict, torch.Tensor, np.ndarray)):
-                obs = self.preprocess_observation(obs)
+            # Preserve [B, T, ...] shapes for recurrent sequence processing.
+            # Only ensure tensors are on the correct device without reshaping.
+            if isinstance(obs, dict):
+                obs = {
+                    k: (v if isinstance(v, torch.Tensor) else torch.as_tensor(v)).to(
+                        self.device
+                    )
+                    for k, v in obs.items()
+                }
+            elif isinstance(obs, torch.Tensor):
+                obs = obs.to(self.device)
+            else:  # numpy or other array-like
+                obs = torch.as_tensor(obs, device=self.device)
             # ---- Features / values for the whole sequence (do NOT resample actions) ----
             # (we ignore returned sampled actions/log_probs)
             _, _, entropies, features_seq, _ = self.actor.sequence_forward(
