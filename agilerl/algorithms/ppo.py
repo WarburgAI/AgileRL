@@ -105,7 +105,8 @@ class PPO(RLAlgorithm):
         mut: Optional[str] = None,
         action_std_init: float = 0.0,
         clip_coef: float = 0.2,
-        vf_clip_coef: Optional[float] = None,
+        vf_clip_param: Optional[float] = None,
+        optimizer_eps: float = 1e-5,
         ent_coef: float = 0.01,
         vf_coef: float = 0.5,
         max_grad_norm: float = 0.5,
@@ -243,7 +244,7 @@ class PPO(RLAlgorithm):
         self.gae_lambda = gae_lambda
         self.action_std_init = action_std_init
         self.clip_coef = clip_coef
-        self.vf_clip_coef = vf_clip_coef if vf_clip_coef is not None else clip_coef
+        self.vf_clip_param = clip_coef if vf_clip_param is None else vf_clip_param
         self.ent_coef = ent_coef
         self.vf_coef = vf_coef
         self.max_grad_norm = max_grad_norm
@@ -309,7 +310,10 @@ class PPO(RLAlgorithm):
             self.register_mutation_hook(self.share_encoder_parameters)
 
         self.optimizer = OptimizerWrapper(
-            optim.Adam, networks=[self.actor, self.critic], lr=self.lr
+            optim.Adam,
+            networks=[self.actor, self.critic],
+            lr=self.lr,
+            optimizer_kwargs={"eps": optimizer_eps},
         )
 
         # Initialize rollout buffer if enabled
@@ -507,9 +511,17 @@ class PPO(RLAlgorithm):
 
         log_prob = self.actor.action_log_prob(actions)
 
-        # Use -log_prob as entropy when squashing output in continuous action spaces
+        # Compute proper entropy if not provided
         if entropy is None:
-            entropy = -log_prob.mean()
+            # Try to compute entropy from the actor's head
+            try:
+                latent = self.actor.extract_features(obs, hidden_state=hidden_state)
+                entropy = self.actor.head_net.entropy_from_latent(
+                    latent, action_mask=None
+                )
+            except (AttributeError, NotImplementedError):
+                # Fallback: this is not accurate entropy but a rough approximation
+                entropy = -log_prob.mean()
 
         return log_prob, entropy, values
 
@@ -554,8 +566,20 @@ class PPO(RLAlgorithm):
                 )
             )
 
-        # Use -log_prob as entropy when squashing output in continuous action spaces
-        entropy = -log_prob.mean() if entropy is None else entropy
+        # Compute proper entropy if not provided
+        if entropy is None:
+            # Try to compute entropy from the actor's head
+            try:
+                with torch.no_grad():
+                    latent = self.actor.extract_features(
+                        self.preprocess_observation(obs), hidden_state=hidden_state
+                    )
+                    entropy = self.actor.head_net.entropy_from_latent(
+                        latent, action_mask=action_mask
+                    )
+            except (AttributeError, NotImplementedError):
+                # Fallback: this is not accurate entropy but a rough approximation
+                entropy = -log_prob.mean()
 
         # Clip to action space during inference
         action_np = action.cpu().data.numpy()
@@ -586,6 +610,19 @@ class PPO(RLAlgorithm):
                 entropy_np,
                 values_np,
             )
+
+    @staticmethod
+    def _explained_variance(y_pred: torch.Tensor, y_true: torch.Tensor) -> float:
+        """Calculate explained variance.
+
+        :param y_pred: Predicted values (shape: (N,))
+        :param y_true: True returns (shape: (N,))
+        :return: Explained variance ratio
+        """
+        var_y = torch.var(y_true)
+        if var_y <= 0:
+            return 0.0
+        return (1.0 - torch.var(y_true - y_pred) / var_y).item()
 
     def compute_loss(
         self,
@@ -655,7 +692,7 @@ class PPO(RLAlgorithm):
             if old_values is not None:
                 v_loss_unclipped = (new_values - returns) ** 2
                 v_clipped = old_values + torch.clamp(
-                    new_values - old_values, -self.vf_clip_coef, self.vf_clip_coef
+                    new_values - old_values, -self.vf_clip_param, self.vf_clip_param
                 )
                 v_loss_clipped = (v_clipped - returns) ** 2
                 value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
@@ -707,7 +744,7 @@ class PPO(RLAlgorithm):
         if old_values is not None:
             v_loss_unclipped = (new_value_t - returns) ** 2
             v_clipped = old_values + torch.clamp(
-                new_value_t - old_values, -self.vf_clip_coef, self.vf_clip_coef
+                new_value_t - old_values, -self.vf_clip_param, self.vf_clip_param
             )
             v_loss_clipped = (v_clipped - returns) ** 2
             value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
@@ -899,6 +936,16 @@ class PPO(RLAlgorithm):
                 self.learn_metrics.add("entropy_loss", loss_dict["entropy_loss"].item())
                 self.learn_metrics.add("approx_kl", loss_dict["approx_kl"])
                 self.learn_metrics.add("clip_fraction", loss_dict["clip_fraction"])
+
+                # Quick EV on current minibatch (post-update prediction is fine for monitoring)
+                with torch.no_grad():
+                    if self.share_encoders:
+                        latent_ev = self.actor.extract_features(mb_obs)
+                        v_pred = self.critic.forward_head(latent_ev).squeeze(-1)
+                    else:
+                        v_pred = self.critic(mb_obs).squeeze(-1)
+                    ev = self._explained_variance(v_pred, mb_returns)
+                self.learn_metrics.add("explained_variance", ev)
 
                 num_minibatches_this_epoch += 1
 
@@ -1107,6 +1154,13 @@ class PPO(RLAlgorithm):
                 self.learn_metrics.add("entropy_loss", loss_dict["entropy_loss"].item())
                 self.learn_metrics.add("approx_kl", loss_dict["approx_kl"])
                 self.learn_metrics.add("clip_fraction", loss_dict["clip_fraction"])
+
+                # Calculate explained variance using old values vs returns (simpler and doesn't need recomputation)
+                with torch.no_grad():
+                    returns_flat = mb_returns_seq.reshape(-1)
+                    values_flat = mb_old_values_seq.reshape(-1)
+                    ev = self._explained_variance(values_flat, returns_flat)
+                self.learn_metrics.add("explained_variance", ev)
 
                 num_minibatches_this_epoch += 1
 

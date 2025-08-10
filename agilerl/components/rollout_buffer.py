@@ -200,6 +200,9 @@ class RolloutBuffer:
                     (self.capacity, self.num_envs), dtype=torch.float32
                 ),
                 "dones": torch.zeros((self.capacity, self.num_envs), dtype=torch.bool),
+                "timeouts": torch.zeros(
+                    (self.capacity, self.num_envs), dtype=torch.bool
+                ),
                 "values": torch.zeros(
                     (self.capacity, self.num_envs), dtype=torch.float32
                 ),
@@ -269,6 +272,7 @@ class RolloutBuffer:
         ] = None,  # Not used if only initial hidden states are stored
         episode_start: Optional[Union[bool, np.ndarray]] = None,
         action_mask: Optional[ArrayOrTensor] = None,
+        timeouts: Optional[Union[bool, np.ndarray]] = None,
     ) -> None:
         """
         Add a new batch of observations and associated data from vectorized environments to the buffer.
@@ -352,6 +356,12 @@ class RolloutBuffer:
         # Dones
         done_tensor = torch.as_tensor(done, dtype=torch.bool, device="cpu")
         current_step_data["dones"] = done_tensor.reshape(self.num_envs)
+
+        # Timeouts (treat missing as False)
+        if timeouts is None:
+            timeouts = np.zeros(self.num_envs, dtype=bool)
+        timeouts_tensor = torch.as_tensor(timeouts, dtype=torch.bool, device="cpu")
+        current_step_data["timeouts"] = timeouts_tensor.reshape(self.num_envs)
 
         # Values
         value_tensor = torch.as_tensor(value, dtype=torch.float32, device="cpu")
@@ -440,7 +450,10 @@ class RolloutBuffer:
             self.full = True
 
     def compute_returns_and_advantages(
-        self, last_value: ArrayOrTensor, last_done: ArrayOrTensor
+        self,
+        last_value: ArrayOrTensor,
+        last_done: ArrayOrTensor,
+        last_timeout: Optional[ArrayOrTensor] = None,
     ) -> None:
         """
         Compute returns and advantages for the stored experiences using GAE or Monte Carlo.
@@ -471,16 +484,36 @@ class RolloutBuffer:
         # Slicing to buffer_size for all components.
         rewards_np = self.buffer["rewards"][:buffer_size].cpu().numpy()
         dones_np = self.buffer["dones"][:buffer_size].cpu().numpy()
+        timeouts_np = (
+            self.buffer["timeouts"][:buffer_size].cpu().numpy()
+            if "timeouts" in self.buffer.keys()
+            else np.zeros_like(dones_np)
+        )
         values_np = self.buffer["values"][:buffer_size].cpu().numpy()
+
+        # For time-limit bootstrapping: terminals are actual episode ends (not timeouts)
+        # Timeouts should bootstrap from next value
+        terminals_np = dones_np & ~timeouts_np
 
         if self.use_gae:
             last_gae_lambda = np.zeros(self.num_envs, dtype=np.float32)
             for t in reversed(range(buffer_size)):
                 if t == buffer_size - 1:
-                    next_non_terminal = 1.0 - last_done_np.astype(float)
+                    # Handle last step: only terminal if done AND not timeout
+                    last_timeout_np = (
+                        last_timeout.cpu().numpy().reshape(self.num_envs)
+                        if isinstance(last_timeout, torch.Tensor)
+                        else (
+                            np.asarray(last_timeout).reshape(self.num_envs)
+                            if last_timeout is not None
+                            else np.zeros(self.num_envs, dtype=bool)
+                        )
+                    )
+                    last_terminal = last_done_np & ~last_timeout_np
+                    next_non_terminal = 1.0 - last_terminal.astype(float)
                     next_values = last_value_np.astype(float)
                 else:
-                    next_non_terminal = 1.0 - dones_np[t + 1].astype(float)
+                    next_non_terminal = 1.0 - terminals_np[t + 1].astype(float)
                     next_values = values_np[t + 1]
 
                 delta = (
@@ -495,13 +528,23 @@ class RolloutBuffer:
             returns_np = advantages_np + values_np
         else:
             # Monte Carlo returns
+            last_timeout_np = (
+                last_timeout.cpu().numpy().reshape(self.num_envs)
+                if isinstance(last_timeout, torch.Tensor)
+                else (
+                    np.asarray(last_timeout).reshape(self.num_envs)
+                    if last_timeout is not None
+                    else np.zeros(self.num_envs, dtype=bool)
+                )
+            )
+            last_terminal = last_done_np & ~last_timeout_np
             last_returns_np = last_value_np.astype(float) * (
-                1.0 - last_done_np.astype(float)
+                1.0 - last_terminal.astype(float)
             )
             for t in reversed(range(buffer_size)):
                 returns_np[t] = last_returns_np = rewards_np[
                     t
-                ] + self.gamma * last_returns_np * (1.0 - dones_np[t].astype(float))
+                ] + self.gamma * last_returns_np * (1.0 - terminals_np[t].astype(float))
             advantages_np = returns_np - values_np
 
         # Assign computed advantages and returns back to the TensorDict

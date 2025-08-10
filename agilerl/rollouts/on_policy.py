@@ -59,6 +59,7 @@ class RolloutHook(ABC):
         next_obs,
         hidden_state,
         step_data: Dict[str, Any],
+        timeout=None,
     ) -> Dict[str, Any]:
         """Prepare data for buffer addition."""
         return {
@@ -70,6 +71,7 @@ class RolloutHook(ABC):
             "log_prob": log_prob,
             "next_obs": next_obs,
             "hidden_state": hidden_state,
+            "timeouts": timeout,
             **step_data,
         }
 
@@ -92,6 +94,7 @@ class RolloutHook(ABC):
             hidden_state=buffer_data["hidden_state"],
             episode_start=np.atleast_1d(buffer_data["episode_start"]),
             action_mask=buffer_data.get("action_mask", None),
+            timeouts=buffer_data.get("timeouts", np.zeros(agent.num_envs, dtype=bool)),
         )
 
     def on_episode_end(
@@ -186,6 +189,7 @@ class ICMHook(RolloutHook):
             hidden_state=buffer_data["hidden_state"],
             encoder_out=encoder_output_np,
             episode_start=np.atleast_1d(buffer_data["episode_start"]),
+            timeouts=buffer_data.get("timeouts", np.zeros(agent.num_envs, dtype=bool)),
         )
 
 
@@ -225,6 +229,7 @@ class CVARHook(RolloutHook):
         next_obs,
         hidden_state,
         step_data: Dict[str, Any],
+        timeout=None,
     ) -> Dict[str, Any]:
         # CVAR-specific: accumulate episode returns first
         agent._episode_returns += np.asarray(reward, dtype=np.float32)
@@ -274,6 +279,7 @@ class CVARHook(RolloutHook):
             "log_prob": np.asarray(log_prob, dtype=np.float32).reshape(-1),
             "next_obs": next_obs,
             "hidden_state": hidden_state,
+            "timeouts": timeout,
             "update": updates,
         }
 
@@ -290,6 +296,7 @@ class CVARHook(RolloutHook):
             next_obs=buffer_data["next_obs"],
             hidden_state=buffer_data["hidden_state"],
             episode_start=buffer_data["episode_start"],
+            timeouts=buffer_data.get("timeouts", np.zeros(agent.num_envs, dtype=bool)),
         )
 
     def on_episode_end(
@@ -342,6 +349,24 @@ def get_rollout_hooks(agent) -> List[RolloutHook]:
     hooks.append(StandardPPOHook())
 
     return hooks
+
+
+def _extract_timeouts(info, num_envs):
+    """Extract timeout flags from environment info."""
+    if (
+        isinstance(info, (list, np.ndarray))
+        and len(info) == num_envs
+        and all(isinstance(i, dict) for i in info)
+    ):
+        return np.array(
+            [bool(d.get("TimeLimit.truncated", False)) for d in info], dtype=bool
+        )
+    if isinstance(info, dict):
+        # For single environment, broadcast to all environments
+        return np.full(
+            num_envs, bool(info.get("TimeLimit.truncated", False)), dtype=bool
+        )
+    return np.zeros(num_envs, dtype=bool)
 
 
 def _collect_rollouts(
@@ -509,6 +534,9 @@ def _collect_rollouts(
                 agent, reward, obs, next_obs, action, step_data
             )
 
+            # Detect time-limit truncation from info (Gymnasium/TimeLimit)
+            timeout_flags = _extract_timeouts(next_info, agent.num_envs)
+
             # Check if termination condition is met
             if isinstance(term, (list, np.ndarray)):
                 is_terminal = (
@@ -531,6 +559,7 @@ def _collect_rollouts(
                 next_obs,
                 current_hidden_state_for_buffer,
                 step_data,
+                timeout=timeout_flags,
             )
 
             buffer_data["episode_start"] = last_episode_starts
@@ -586,6 +615,7 @@ def _collect_rollouts(
         agent._last_obs = (obs, info)
         agent._last_done = done
         agent._last_scores = scores
+        agent._last_info = info
 
         # Calculate last value to compute returns and advantages properly
         with torch.no_grad():
@@ -603,8 +633,11 @@ def _collect_rollouts(
             last_value = last_value.cpu().numpy()
             last_done = np.atleast_1d(done).astype(bool)
 
+        # Get last timeout info if available
+        last_timeout = _extract_timeouts(info, agent.num_envs)
+
         agent.rollout_buffer.compute_returns_and_advantages(
-            last_value=last_value, last_done=last_done
+            last_value=last_value, last_done=last_done, last_timeout=last_timeout
         )
 
     # Update timing metrics using the timing tracker
@@ -644,7 +677,11 @@ def collect_rollouts(
     :rtype: List[float]
     """
     # Extract last state if continuing from previous rollout
-    last_obs, last_info = getattr(agent, "_last_obs", (None, None))
+    last_obs_info = getattr(agent, "_last_obs", None)
+    if last_obs_info is None:
+        last_obs, last_info = None, None
+    else:
+        last_obs, last_info = last_obs_info
     last_done = getattr(agent, "_last_done", None)
     last_scores = getattr(agent, "_last_scores", None)
 
@@ -691,7 +728,11 @@ def collect_rollouts_recurrent(
     :rtype: List[float]
     """
     # Extract last state if continuing from previous rollout
-    last_obs, last_info = getattr(agent, "_last_obs", (None, None))
+    last_obs_info = getattr(agent, "_last_obs", None)
+    if last_obs_info is None:
+        last_obs, last_info = None, None
+    else:
+        last_obs, last_info = last_obs_info
     last_done = getattr(agent, "_last_done", None)
     last_scores = getattr(agent, "_last_scores", None)
 
