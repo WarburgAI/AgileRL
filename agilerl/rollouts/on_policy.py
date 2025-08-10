@@ -557,9 +557,10 @@ def _collect_rollouts(
                             :, finished_mask, :
                         ]
                         if reset_states_for_key.shape[1] > 0:
+                            # Detach to prevent gradient accumulation across episodes
                             agent.hidden_state[key][
                                 :, finished_mask, :
-                            ] = reset_states_for_key
+                            ] = reset_states_for_key.detach()
 
             # Handle episode endings through hooks
             for hook in hooks:

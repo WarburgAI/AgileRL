@@ -753,6 +753,10 @@ class PPO(RLAlgorithm):
         self.last_learn_time = self.timing_tracker.end_timer("learn_total")
         self.total_learn_time += self.last_learn_time
 
+        # Clear CUDA cache after training to free memory
+        if self.device.startswith("cuda"):
+            torch.cuda.empty_cache()
+
         # Combine all metrics
         metrics = self.learn_metrics.get_all_averages("learn/")
         metrics.update(
@@ -847,7 +851,8 @@ class PPO(RLAlgorithm):
                         mb_hidden_states_td = minibatch_td.get("hidden_states")
                         eval_hidden_state = {
                             # v has shape (minibatch_size, layers, size), permute to (layers, minibatch_size, size)
-                            k: v.permute(1, 0, 2).contiguous()
+                            # Detach to prevent old computation graphs from accumulating
+                            k: v.permute(1, 0, 2).contiguous().detach()
                             for k, v in mb_hidden_states_td.items()
                         }
                     else:
@@ -885,6 +890,21 @@ class PPO(RLAlgorithm):
                 self.learn_metrics.add("clip_fraction", loss_dict["clip_fraction"])
 
                 num_minibatches_this_epoch += 1
+
+                # Clean up minibatch tensors to free memory
+                del (
+                    mb_obs,
+                    mb_actions,
+                    mb_old_log_probs,
+                    mb_advantages,
+                    mb_returns,
+                    mb_old_values,
+                )
+                if mb_action_masks is not None:
+                    del mb_action_masks
+                if eval_hidden_state is not None:
+                    del eval_hidden_state
+                del minibatch_td, loss_dict, loss
 
             if (
                 self.target_kl is not None
@@ -1035,7 +1055,8 @@ class PPO(RLAlgorithm):
                 if self.recurrent and mb_initial_hidden_states_dict is not None:
                     current_step_hidden_state_actor = {
                         # val is (batch_seq_size, layers, size), permute to (layers, batch_seq_size, size)
-                        key: val.permute(1, 0, 2).contiguous().to(self.device)
+                        # Detach to prevent old computation graphs from accumulating
+                        key: val.permute(1, 0, 2).contiguous().detach().to(self.device)
                         for key, val in mb_initial_hidden_states_dict.items()
                     }
 
@@ -1070,6 +1091,17 @@ class PPO(RLAlgorithm):
                 self.learn_metrics.add("clip_fraction", loss_dict["clip_fraction"])
 
                 num_minibatches_this_epoch += 1
+
+                # Clean up BPTT minibatch tensors to free memory
+                del mb_obs_seq, mb_actions_seq, mb_old_log_probs_seq
+                del mb_advantages_seq, mb_returns_seq, mb_old_values_seq
+                if mb_action_masks_seq is not None:
+                    del mb_action_masks_seq
+                if current_step_hidden_state_actor is not None:
+                    del current_step_hidden_state_actor
+                if mb_initial_hidden_states_dict is not None:
+                    del mb_initial_hidden_states_dict
+                del current_minibatch_td, loss_dict, loss
 
                 if (
                     self.target_kl is not None
