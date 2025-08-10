@@ -582,8 +582,10 @@ def _collect_rollouts(
         for hook in hooks:
             hook.on_rollout_end(agent, env, step_data)
 
-        # Store the last observation and info for potential continuation
+        # Store the last observation, info, done, and scores for potential continuation
         agent._last_obs = (obs, info)
+        agent._last_done = done
+        agent._last_scores = scores
 
         # Calculate last value to compute returns and advantages properly
         with torch.no_grad():
@@ -641,20 +643,18 @@ def collect_rollouts(
     :return: The list of scores for the episodes completed in the rollouts
     :rtype: List[float]
     """
-    # Use stored state if not resetting and available
-    last_obs, last_info = (
-        agent._last_obs
-        if hasattr(agent, "_last_obs") and agent._last_obs
-        else (None, None)
-    )
+    # Extract last state if continuing from previous rollout
+    last_obs, last_info = getattr(agent, "_last_obs", (None, None))
+    last_done = getattr(agent, "_last_done", None)
+    last_scores = getattr(agent, "_last_scores", None)
 
     completed_scores, _, _, _, _ = _collect_rollouts(
         agent,
         env,
         n_steps,
         last_obs=last_obs,
-        last_done=None,
-        last_scores=None,
+        last_done=last_done,
+        last_scores=last_scores,
         last_info=last_info,
         recurrent=False,
         reset_on_collect=reset_on_collect,
@@ -690,20 +690,18 @@ def collect_rollouts_recurrent(
     :return: The list of scores for the episodes completed in the rollouts
     :rtype: List[float]
     """
-    # Use stored state if not resetting and available
-    last_obs, last_info = (
-        agent._last_obs
-        if hasattr(agent, "_last_obs") and agent._last_obs
-        else (None, None)
-    )
+    # Extract last state if continuing from previous rollout
+    last_obs, last_info = getattr(agent, "_last_obs", (None, None))
+    last_done = getattr(agent, "_last_done", None)
+    last_scores = getattr(agent, "_last_scores", None)
 
     completed_scores, _, _, _, _ = _collect_rollouts(
         agent,
         env,
         n_steps,
         last_obs=last_obs,
-        last_done=None,
-        last_scores=None,
+        last_done=last_done,
+        last_scores=last_scores,
         last_info=last_info,
         recurrent=True,
         reset_on_collect=reset_on_collect,

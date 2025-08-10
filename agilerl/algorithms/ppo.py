@@ -105,6 +105,7 @@ class PPO(RLAlgorithm):
         mut: Optional[str] = None,
         action_std_init: float = 0.0,
         clip_coef: float = 0.2,
+        vf_clip_coef: Optional[float] = None,
         ent_coef: float = 0.01,
         vf_coef: float = 0.5,
         max_grad_norm: float = 0.5,
@@ -242,6 +243,7 @@ class PPO(RLAlgorithm):
         self.gae_lambda = gae_lambda
         self.action_std_init = action_std_init
         self.clip_coef = clip_coef
+        self.vf_clip_coef = vf_clip_coef if vf_clip_coef is not None else clip_coef
         self.ent_coef = ent_coef
         self.vf_coef = vf_coef
         self.max_grad_norm = max_grad_norm
@@ -603,6 +605,9 @@ class PPO(RLAlgorithm):
         if learn_by_bptt:
             if seq_len is None:
                 seq_len = self.max_seq_len
+            # Preprocess observations for consistency
+            if isinstance(obs, (dict, torch.Tensor, np.ndarray)):
+                obs = self.preprocess_observation(obs)
             # ---- Features / values for the whole sequence (do NOT resample actions) ----
             # (we ignore returned sampled actions/log_probs)
             _, _, entropies, features_seq, _ = self.actor.sequence_forward(
@@ -619,12 +624,18 @@ class PPO(RLAlgorithm):
                     .view(B, T)
                 )
             else:
+                # Observations already preprocessed above for consistency
                 new_values, _ = self.critic.sequence_forward(obs, hidden_state)
                 new_values = new_values.squeeze(-1)  # [B,T]
             B, T = features_seq.shape[:2]
             flat_feat = features_seq.reshape(B * T, -1)
             # Flatten actions (and mask if provided) to match latent
             flat_act = actions.reshape(B * T, -1)
+            # Fix discrete action shape - squeeze extra dimension
+            if isinstance(self.action_space, spaces.Discrete):
+                flat_act = flat_act.view(-1)  # (B*T,)
+            elif isinstance(self.action_space, spaces.MultiDiscrete):
+                flat_act = flat_act.long()  # Ensure long dtype for MultiDiscrete
             flat_mask = (
                 action_mask.reshape(B * T, -1) if action_mask is not None else None
             )
@@ -644,7 +655,7 @@ class PPO(RLAlgorithm):
             if old_values is not None:
                 v_loss_unclipped = (new_values - returns) ** 2
                 v_clipped = old_values + torch.clamp(
-                    new_values - old_values, -self.clip_coef, self.clip_coef
+                    new_values - old_values, -self.vf_clip_coef, self.vf_clip_coef
                 )
                 v_loss_clipped = (v_clipped - returns) ** 2
                 value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
@@ -696,7 +707,7 @@ class PPO(RLAlgorithm):
         if old_values is not None:
             v_loss_unclipped = (new_value_t - returns) ** 2
             v_clipped = old_values + torch.clamp(
-                new_value_t - old_values, -self.clip_coef, self.clip_coef
+                new_value_t - old_values, -self.vf_clip_coef, self.vf_clip_coef
             )
             v_loss_clipped = (v_clipped - returns) ** 2
             value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
@@ -754,7 +765,7 @@ class PPO(RLAlgorithm):
         self.total_learn_time += self.last_learn_time
 
         # Clear CUDA cache after training to free memory
-        if self.device.startswith("cuda"):
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.empty_cache()
 
         # Combine all metrics
@@ -891,6 +902,12 @@ class PPO(RLAlgorithm):
 
                 num_minibatches_this_epoch += 1
 
+                # Check KL divergence for early stopping using current minibatch value
+                current_approx_kl = loss_dict["approx_kl"]
+                should_stop = (
+                    self.target_kl is not None and current_approx_kl > self.target_kl
+                )
+
                 # Clean up minibatch tensors to free memory
                 del (
                     mb_obs,
@@ -906,12 +923,13 @@ class PPO(RLAlgorithm):
                     del eval_hidden_state
                 del minibatch_td, loss_dict, loss
 
-            if (
-                self.target_kl is not None
-                and self.learn_metrics.get_count("approx_kl") > 0
-                and self.learn_metrics.get_average("approx_kl") > self.target_kl
-            ):
-                break  # Early stopping for the epoch if KL divergence target is exceeded
+                if should_stop:
+                    warnings.warn(
+                        f"Flat learning: KL divergence {current_approx_kl:.4f} exceeded target {self.target_kl}. Stopping update for this epoch."
+                    )
+                    break  # Break from minibatch loop for this epoch
+
+            # Note: Per-minibatch KL early stopping is handled inside the minibatch loop above
 
     def _learn_from_rollout_buffer_bptt(self) -> None:
         """Learning procedure using truncated BPTT for recurrent networks."""
@@ -1092,6 +1110,12 @@ class PPO(RLAlgorithm):
 
                 num_minibatches_this_epoch += 1
 
+                # Check KL divergence for early stopping using current minibatch value
+                current_approx_kl = loss_dict["approx_kl"]
+                should_stop = (
+                    self.target_kl is not None and current_approx_kl > self.target_kl
+                )
+
                 # Clean up BPTT minibatch tensors to free memory
                 del mb_obs_seq, mb_actions_seq, mb_old_log_probs_seq
                 del mb_advantages_seq, mb_returns_seq, mb_old_values_seq
@@ -1103,13 +1127,9 @@ class PPO(RLAlgorithm):
                     del mb_initial_hidden_states_dict
                 del current_minibatch_td, loss_dict, loss
 
-                if (
-                    self.target_kl is not None
-                    and self.learn_metrics.get_count("approx_kl") > 0
-                    and self.learn_metrics.get_average("approx_kl") > self.target_kl
-                ):
+                if should_stop:
                     warnings.warn(
-                        f"Minibatch: KL divergence {self.learn_metrics.get_average('approx_kl'):.4f} exceeded target {self.target_kl}. Stopping update for this epoch."
+                        f"Minibatch: KL divergence {current_approx_kl:.4f} exceeded target {self.target_kl}. Stopping update for this epoch."
                     )
                     break  # Break from minibatch loop for this epoch
 
