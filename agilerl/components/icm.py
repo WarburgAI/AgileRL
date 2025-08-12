@@ -394,45 +394,6 @@ def get_action_sizes(action_space):
         raise ValueError(f"Unsupported action space type: {type(action_space)}")
 
 
-def actions_to_one_hot(actions, action_space):
-    """Convert actions to one-hot encoding for discrete spaces, or normalize for continuous spaces."""
-    if isinstance(action_space, spaces.Discrete):
-        return F.one_hot(actions.long(), num_classes=action_space.n).float()
-    elif isinstance(action_space, spaces.MultiDiscrete):
-        # actions shape: (batch_size, num_action_dims)
-        one_hots = []
-        for i, n_actions in enumerate(action_space.nvec):
-            one_hot = F.one_hot(actions[:, i].long(), num_classes=n_actions).float()
-            one_hots.append(one_hot)
-        return torch.cat(one_hots, dim=1)
-    elif isinstance(action_space, spaces.Box):
-        # For continuous actions, just return the actions as float tensors
-        # Optionally normalize to [0, 1] range
-        actions_float = actions.float()
-        if hasattr(action_space, "is_bounded") and action_space.is_bounded():
-            # Normalize to [0, 1] range
-            low = torch.tensor(
-                action_space.low, device=actions.device, dtype=torch.float32
-            )
-            high = torch.tensor(
-                action_space.high, device=actions.device, dtype=torch.float32
-            )
-            actions_float = (actions_float - low) / (high - low)
-        elif hasattr(action_space, "low") and hasattr(action_space, "high"):
-            # Handle cases where bounds exist but is_bounded() is not available
-            low = torch.tensor(
-                action_space.low, device=actions.device, dtype=torch.float32
-            )
-            high = torch.tensor(
-                action_space.high, device=actions.device, dtype=torch.float32
-            )
-            if not torch.isinf(low).any() and not torch.isinf(high).any():
-                actions_float = (actions_float - low) / (high - low)
-        return actions_float
-    else:
-        raise ValueError(f"Unsupported action space type: {type(action_space)}")
-
-
 def is_continuous_action_space(action_space):
     """Check if the action space is continuous."""
     return isinstance(action_space, spaces.Box)
@@ -662,7 +623,7 @@ class ICM(EvolvableModule):
             # Use appropriate dtype based on action space type
             dtype = torch.float32 if self.is_continuous_action else torch.long
             action_batch_t = self._to_tensor(action_batch, dtype=dtype)
-            action_input = actions_to_one_hot(action_batch_t, self.action_space)
+            action_input = ICM.actions_to_one_hot(action_batch_t, self.action_space)
 
             with torch.no_grad():
                 pred_phi_next_obs = self.forward_model(phi_obs, action_input)
@@ -976,3 +937,42 @@ class ICM(EvolvableModule):
         # Prepend 'icm_encoder_' to distinguish from actor/critic hidden states
         return {f"icm_encoder_{k}": v for k, v in encoder_hidden.items()}
 
+
+    @staticmethod
+    def actions_to_one_hot(actions, action_space):
+        """Convert actions to one-hot encoding for discrete spaces, or normalize for continuous spaces."""
+        if isinstance(action_space, spaces.Discrete):
+            return F.one_hot(actions.long(), num_classes=action_space.n).float()
+        elif isinstance(action_space, spaces.MultiDiscrete):
+            # actions shape: (batch_size, num_action_dims)
+            one_hots = []
+            for i, n_actions in enumerate(action_space.nvec):
+                one_hot = F.one_hot(actions[:, i].long(), num_classes=n_actions).float()
+                one_hots.append(one_hot)
+            return torch.cat(one_hots, dim=1)
+        elif isinstance(action_space, spaces.Box):
+            # For continuous actions, just return the actions as float tensors
+            # Optionally normalize to [0, 1] range
+            actions_float = actions.float()
+            if hasattr(action_space, "is_bounded") and action_space.is_bounded():
+                # Normalize to [0, 1] range
+                low = torch.tensor(
+                    action_space.low, device=actions.device, dtype=torch.float32
+                )
+                high = torch.tensor(
+                    action_space.high, device=actions.device, dtype=torch.float32
+                )
+                actions_float = (actions_float - low) / (high - low)
+            elif hasattr(action_space, "low") and hasattr(action_space, "high"):
+                # Handle cases where bounds exist but is_bounded() is not available
+                low = torch.tensor(
+                    action_space.low, device=actions.device, dtype=torch.float32
+                )
+                high = torch.tensor(
+                    action_space.high, device=actions.device, dtype=torch.float32
+                )
+                if not torch.isinf(low).any() and not torch.isinf(high).any():
+                    actions_float = (actions_float - low) / (high - low)
+            return actions_float
+        else:
+            raise ValueError(f"Unsupported action space type: {type(action_space)}")

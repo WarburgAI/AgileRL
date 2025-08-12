@@ -105,13 +105,14 @@ class PBIM_ICM(ICM):
         :param kwargs: Keyword arguments passed to the parent's compute_loss.
         :return: A tuple containing losses, hidden states, and the predicted next state.
         """
+        action_input = kwargs.pop("action_input", None)
+        action_batch_t = kwargs.pop("action_batch_t", None)
         (
             phi_state,
             phi_next_state,
             hidden_state,
             hidden_state_next,
         ) = self.embed_obs(*args, **kwargs)
-        action_input = kwargs.get("action_input", None)
 
         # Get predicted action
         pred_action = self.inverse_model(phi_state, phi_next_state)
@@ -253,19 +254,39 @@ class PBIM_ICM_PPO(ICM_PPO):
             buffer_td = buffer_td_external
         else:
             buffer_td = self.rollout_buffer.get_tensor_batch(device=self.device)
+            buffer_td = buffer_td.view(-1)
 
-        potential, next_potential = self.get_potentials(
-            action_batch=buffer_td["actions"],
-            obs_batch=buffer_td["observations"],
-            next_obs_batch=buffer_td["next_observations"],
-            embedded_obs=buffer_td["encoder_out"],
-        )
+        if self.use_shared_encoder_for_icm:
+            # Build (t, t+1) pairs along time, flatten over B*(T-1)
+            obs_t = buffer_td["observations"][:-1]
+            obs_tp = buffer_td["next_observations"][1:]
+            act_t = buffer_td["actions"][:-1]
+
+            emb_t = buffer_td["encoder_out"][:-1]
+            emb_tp = buffer_td["encoder_out"][1:]
+        else:
+            obs_t = buffer_td["observations"]
+            obs_tp = buffer_td["next_observations"]
+            act_t = buffer_td["actions"]
+            emb_t = buffer_td["encoder_out"]
+            emb_tp = buffer_td["encoder_out"]
+
+
+        with torch.no_grad():
+            potential, next_potential = self.get_potentials(
+                action_batch=act_t,
+                obs_batch=obs_t,
+                next_obs_batch=obs_tp,
+                embedded_obs=emb_t,
+                embedded_next_obs=emb_tp,
+            )
 
         # Zero out potential for terminal states, as per PBRS for episodic tasks
-        dones = buffer_td["dones"].to(self.device)
-        next_potential = next_potential * (1.0 - dones)
+        dones = buffer_td["dones"]
+        next_potential = next_potential.masked_fill(dones, 0)
 
         # Compute potential-based shaping reward F(s, s') = gamma * Phi(s') - Phi(s)
+        assert potential.shape == next_potential.shape, f"Potential shape: {potential.shape}, Next potential shape: {next_potential.shape}"
         pbim_rewards = self.gamma * next_potential - potential
 
         # Normalize the potential-based rewards
@@ -274,8 +295,13 @@ class PBIM_ICM_PPO(ICM_PPO):
             self.reward_normalizer.var + 1e-8
         )
 
+        # out = torch.zeros_like(normalized_pbim_rewards)
+        # out[:, 1:] = normalized_pbim_rewards
+        # normalized_pbim_rewards = out
+
         # Combine with extrinsic rewards
         rewards = buffer_td["rewards"].to(self.device)
+        assert rewards.shape == normalized_pbim_rewards.shape, f"Rewards shape: {rewards.shape}, Normalized PBIM rewards shape: {normalized_pbim_rewards.shape}"
         combined_rewards = (
             rewards + self.intrinsic_reward_weight * normalized_pbim_rewards
         )
@@ -292,53 +318,61 @@ class PBIM_ICM_PPO(ICM_PPO):
             return super()._learn_from_rollout_buffer_bptt()
 
         buffer_td = self.rollout_buffer.get_tensor_batch(device=self.device)
-        num_sequences = buffer_td["observations"].shape[1]
+        buffer_td = buffer_td.view(-1)
 
         # Reshape for sequence-based processing
-        obs = buffer_td["observations"].reshape(
-            -1, *buffer_td["observations"].shape[2:]
-        )
-        next_obs = buffer_td["next_observations"].reshape(
-            -1, *buffer_td["next_observations"].shape[2:]
-        )
-        actions = buffer_td["actions"].reshape(-1, *buffer_td["actions"].shape[2:])
-        encoder_out = buffer_td["encoder_out"].reshape(
-            -1, *buffer_td["encoder_out"].shape[2:]
-        )
-        rewards = buffer_td["rewards"].to(
-            self.device
-        )  # Keep shape (num_steps, num_envs, 1)
+        if self.use_shared_encoder_for_icm:
+            # Build (t, t+1) pairs along time, flatten over B*(T-1)
+            obs_t = buffer_td["observations"][:-1]
+            obs_tp = buffer_td["next_observations"][1:]
+            act_t = buffer_td["actions"][:-1]
 
-        potential, next_potential = self.get_potentials(
-            action_batch=actions,
-            obs_batch=obs,
-            next_obs_batch=next_obs,
-            embedded_obs=encoder_out,
-        )
+            emb_t = buffer_td["encoder_out"][:-1]
+            emb_tp = buffer_td["encoder_out"][1:]
+        else:
+            obs_t = buffer_td["observations"]
+            obs_tp = buffer_td["next_observations"]
+            act_t = buffer_td["actions"]
+            emb_t = buffer_td["encoder_out"]
+            emb_tp = buffer_td["encoder_out"]
+            
+        num_sequences = obs_t.shape[0]
+            
+        rewards = buffer_td["rewards"]
 
-        # Reshape potentials and dones back to sequence form
-        potential = potential.reshape(-1, num_sequences, 1)
-        next_potential = next_potential.reshape(-1, num_sequences, 1)
-        dones = buffer_td["dones"].to(
-            self.device
-        )  # shape is (num_steps, num_envs, 1)
+        with torch.no_grad():
+            potential, next_potential = self.get_potentials(
+                action_batch=act_t,
+                obs_batch=obs_t,
+                next_obs_batch=obs_tp,
+                embedded_obs=emb_t,
+                embedded_next_obs=emb_tp,
+            )
 
         # Zero out potential for terminal states
-        next_potential = next_potential * (1.0 - dones)
+        dones = buffer_td["dones"]
+        next_potential = next_potential.masked_fill(dones, 0)
 
         # Compute potential-based shaping reward F(s, s') = gamma * Phi(s') - Phi(s)
         pbim_rewards = self.gamma * next_potential - potential
 
         # Normalize the potential-based rewards
         # Flatten for normalizer update, then reshape back
-        self.reward_normalizer.update(pbim_rewards.reshape(-1, 1))
+        self.reward_normalizer.update(pbim_rewards)
         normalized_pbim_rewards = pbim_rewards / torch.sqrt(
             self.reward_normalizer.var + 1e-8
         )
 
+        # out = torch.zeros_like(rewards)
+        # out[:, 1:] = normalized_pbim_rewards
+        # normalized_pbim_rewards = out
+
         # Combine with extrinsic rewards
         combined_rewards = (
-            rewards + self.intrinsic_reward_weight * normalized_pbim_rewards
+            rewards * (1 - self.intrinsic_reward_weight) + self.intrinsic_reward_weight * normalized_pbim_rewards
+        )
+        combined_rewards = combined_rewards.reshape(
+            self.rollout_buffer.capacity, self.num_envs, -1
         )
         buffer_td["rewards"] = combined_rewards.cpu()
 
@@ -367,12 +401,11 @@ class PBIM_ICM_PPO(ICM_PPO):
             obs_batch, action_batch, next_obs_batch
         )
 
-        if self.recurrent:
-            action_input = action_batch_t
-        else:
-            action_input = self.icm.actions_to_one_hot(
-                action_batch_t, self.icm.action_space
-            )
+        # Convert actions to appropriate format
+        # Use appropriate dtype based on action space type
+        dtype = torch.float32 if self.icm.is_continuous_action else torch.long
+        action_batch_tensor = self.icm._to_tensor(action_batch_t, dtype=dtype)
+        action_input = ICM.actions_to_one_hot(action_batch_tensor, self.action_space)
 
         (
             _,  # inverse_loss
@@ -383,13 +416,13 @@ class PBIM_ICM_PPO(ICM_PPO):
             pred_phi_next_state,  # This is used for our potential function Phi
         ) = self.icm.compute_loss(
             obs_batch=obs_batch_t,
-            action_batch_t=action_batch_t,
-            next_obs_batch_t=next_obs_batch_t,
+            # action_batch_t=action_batch_t,
+            next_obs_batch=next_obs_batch_t,
             action_input=action_input,
             embedded_obs=embedded_obs,
             embedded_next_obs=embedded_next_obs,
-            hidden_state=hidden_state_obs,
-            hidden_state_next=hidden_state_next_obs,
+            hidden_state_obs=hidden_state_obs,
+            hidden_state_next_obs=hidden_state_next_obs,
         )
 
         # The potential Phi(s,a) is derived from the predicted next state embedding
