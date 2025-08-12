@@ -147,63 +147,63 @@ class PPO(RLAlgorithm):
         assert isinstance(gamma, (float, int, torch.Tensor)), "Gamma must be a float."
         assert isinstance(gae_lambda, (float, int)), "Lambda must be a float."
         assert gae_lambda >= 0, "Lambda must be greater than or equal to zero."
-        assert isinstance(
-            action_std_init, (float, int)
-        ), "Action standard deviation must be a float."
-        assert (
-            action_std_init >= 0
-        ), "Action standard deviation must be greater than or equal to zero."
-        assert isinstance(
-            clip_coef, (float, int)
-        ), "Clipping coefficient must be a float."
-        assert (
-            clip_coef >= 0
-        ), "Clipping coefficient must be greater than or equal to zero."
-        assert isinstance(
-            ent_coef, (float, int)
-        ), "Entropy coefficient must be a float."
-        assert (
-            ent_coef >= 0
-        ), "Entropy coefficient must be greater than or equal to zero."
-        assert isinstance(
-            vf_coef, (float, int)
-        ), "Value function coefficient must be a float."
-        assert (
-            vf_coef >= 0
-        ), "Value function coefficient must be greater than or equal to zero."
-        assert isinstance(
-            max_grad_norm, (float, int)
-        ), "Maximum norm for gradient clipping must be a float."
-        assert (
-            max_grad_norm >= 0
-        ), "Maximum norm for gradient clipping must be greater than or equal to zero."
-        assert (
-            isinstance(target_kl, (float, int)) or target_kl is None
-        ), "Target KL divergence threshold must be a float."
+        assert isinstance(action_std_init, (float, int)), (
+            "Action standard deviation must be a float."
+        )
+        assert action_std_init >= 0, (
+            "Action standard deviation must be greater than or equal to zero."
+        )
+        assert isinstance(clip_coef, (float, int)), (
+            "Clipping coefficient must be a float."
+        )
+        assert clip_coef >= 0, (
+            "Clipping coefficient must be greater than or equal to zero."
+        )
+        assert isinstance(ent_coef, (float, int)), (
+            "Entropy coefficient must be a float."
+        )
+        assert ent_coef >= 0, (
+            "Entropy coefficient must be greater than or equal to zero."
+        )
+        assert isinstance(vf_coef, (float, int)), (
+            "Value function coefficient must be a float."
+        )
+        assert vf_coef >= 0, (
+            "Value function coefficient must be greater than or equal to zero."
+        )
+        assert isinstance(max_grad_norm, (float, int)), (
+            "Maximum norm for gradient clipping must be a float."
+        )
+        assert max_grad_norm >= 0, (
+            "Maximum norm for gradient clipping must be greater than or equal to zero."
+        )
+        assert isinstance(target_kl, (float, int)) or target_kl is None, (
+            "Target KL divergence threshold must be a float."
+        )
         if target_kl is not None:
-            assert (
-                target_kl >= 0
-            ), "Target KL divergence threshold must be greater than or equal to zero."
-        assert isinstance(
-            update_epochs, int
-        ), "Policy update epochs must be an integer."
-        assert (
-            update_epochs >= 1
-        ), "Policy update epochs must be greater than or equal to one."
-        assert isinstance(
-            wrap, bool
-        ), "Wrap models flag must be boolean value True or False."
+            assert target_kl >= 0, (
+                "Target KL divergence threshold must be greater than or equal to zero."
+            )
+        assert isinstance(update_epochs, int), (
+            "Policy update epochs must be an integer."
+        )
+        assert update_epochs >= 1, (
+            "Policy update epochs must be greater than or equal to one."
+        )
+        assert isinstance(wrap, bool), (
+            "Wrap models flag must be boolean value True or False."
+        )
 
         # New parameters for using RolloutBuffer
-        assert isinstance(
-            use_rollout_buffer, bool
-        ), "Use rollout buffer flag must be boolean value True or False."
-        assert isinstance(
-            recurrent, bool
-        ), "Has hidden states flag must be boolean value True or False."
-        assert isinstance(
-            bptt_sequence_type, BPTTSequenceType
-        ), "bptt_sequence_type must be a BPTTSequenceType enum value."
+        assert isinstance(use_rollout_buffer, bool), (
+            "Use rollout buffer flag must be boolean value True or False."
+        )
+        assert isinstance(recurrent, bool), (
+            "Has hidden states flag must be boolean value True or False."
+        )
+        assert isinstance(bptt_sequence_type, BPTTSequenceType), (
+            "bptt_sequence_type must be a BPTTSequenceType enum value."
+        )
 
         if not use_rollout_buffer:
             warnings.warn(
@@ -857,7 +857,19 @@ class PPO(RLAlgorithm):
         else:
             # .get_tensor_batch() returns a TensorDict on the specified device
             with self.timing_tracker.time_context("get_tensor_batch_time"):
-                buffer_td = self.rollout_buffer.get_tensor_batch(device=self.device)
+                buffer_td = self.rollout_buffer.get_tensor_batch(
+                    device=self.device,
+                    include_keys=[
+                        "observations",
+                        "actions",
+                        "log_probs",
+                        "advantages",
+                        "returns",
+                        "values",
+                        "action_masks",
+                        "hidden_states",
+                    ],
+                )
 
         if buffer_td.is_empty():
             warnings.warn("Buffer data is empty. Skipping learning step.")
@@ -868,10 +880,14 @@ class PPO(RLAlgorithm):
 
         # Normalize advantages
         with self.timing_tracker.time_context("advantage_normalization_time"):
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            adv_mean = advantages.mean()
+            adv_std = advantages.std()
+            advantages.sub_(adv_mean).div_(adv_std + 1e-8)
 
         batch_size = self.batch_size
         num_samples = observations.size(0)  # Total number of samples in the buffer
+        # Release the large observations view reference; we'll slice from buffer_td directly in minibatches
+        del observations
         indices = np.arange(num_samples)
 
         for epoch in range(self.update_epochs):
@@ -899,24 +915,24 @@ class PPO(RLAlgorithm):
                     else None
                 )
 
+                # Prepare hidden state if recurrent, then drop the container ASAP
                 eval_hidden_state = None
                 if self.recurrent:
-                    # If recurrent, hidden_states should be in the buffer_td
-                    # buffer_td["hidden_states"] is a TD: {key: tensor_shape_(total_samples, layers, size)}
-                    # minibatch_td["hidden_states"] will be {key: tensor_shape_(len(minibatch_indices), layers, size)}
-                    # _get_action_and_values expects dict {key: (layers, batch, size)}
                     if "hidden_states" in minibatch_td.keys(include_nested=True):
                         mb_hidden_states_td = minibatch_td.get("hidden_states")
                         eval_hidden_state = {
-                            # v has shape (minibatch_size, layers, size), permute to (layers, minibatch_size, size)
-                            # Detach to prevent old computation graphs from accumulating
                             k: v.permute(1, 0, 2).contiguous().detach()
                             for k, v in mb_hidden_states_td.items()
                         }
+                        # Free the raw hidden states TD after conversion
+                        del mb_hidden_states_td
                     else:
                         warnings.warn(
                             "Recurrent policy, but no hidden_states found in minibatch_td for flat learning."
                         )
+
+                # Free the minibatch container before compute to lower peak memory
+                del minibatch_td
 
                 with self.timing_tracker.time_context("loss_calculation_time"):
                     loss_dict = self.compute_loss(
@@ -932,35 +948,43 @@ class PPO(RLAlgorithm):
                     )
                 loss = loss_dict["loss"]
 
+                # Pre-compute metrics scalars and EV to enable earlier frees
+                policy_loss_item = loss_dict["policy_loss"].item()
+                value_loss_item = loss_dict["value_loss"].item()
+                entropy_loss_item = loss_dict["entropy_loss"].item()
+                approx_kl_value = float(loss_dict["approx_kl"])  # already scalar
+                clip_fraction_value = float(loss_dict["clip_fraction"])  # scalar
+
+                # Compute EV using old values vs returns (no extra forward)
+                with torch.no_grad():
+                    ev = self._explained_variance(
+                        mb_old_values.reshape(-1), mb_returns.reshape(-1)
+                    )
+
+                # Release non-required tensors before backward
+                if mb_action_masks is not None:
+                    del mb_action_masks
+
                 with self.timing_tracker.time_context("backward_pass_time"):
-                    self.optimizer.zero_grad()
+                    self.optimizer.zero_grad(set_to_none=True)
                     loss.backward()
                     clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                     clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
                     self.optimizer.step()
 
-                # Track metrics
-                self.learn_metrics.add("total_loss", loss_dict["loss"].item())
-                self.learn_metrics.add("policy_loss", loss_dict["policy_loss"].item())
-                self.learn_metrics.add("value_loss", loss_dict["value_loss"].item())
-                self.learn_metrics.add("entropy_loss", loss_dict["entropy_loss"].item())
-                self.learn_metrics.add("approx_kl", loss_dict["approx_kl"])
-                self.learn_metrics.add("clip_fraction", loss_dict["clip_fraction"])
-
-                # Quick EV on current minibatch (post-update prediction is fine for monitoring)
-                with torch.no_grad():
-                    if self.share_encoders:
-                        latent_ev = self.actor.extract_features(mb_obs)
-                        v_pred = self.critic.forward_head(latent_ev).squeeze(-1)
-                    else:
-                        v_pred = self.critic(mb_obs).squeeze(-1)
-                    ev = self._explained_variance(v_pred, mb_returns)
+                # Track metrics (use precomputed scalars)
+                self.learn_metrics.add("total_loss", loss.item())
+                self.learn_metrics.add("policy_loss", policy_loss_item)
+                self.learn_metrics.add("value_loss", value_loss_item)
+                self.learn_metrics.add("entropy_loss", entropy_loss_item)
+                self.learn_metrics.add("approx_kl", approx_kl_value)
+                self.learn_metrics.add("clip_fraction", clip_fraction_value)
                 self.learn_metrics.add("explained_variance", ev)
 
                 num_minibatches_this_epoch += 1
 
                 # Check KL divergence for early stopping using current minibatch value
-                current_approx_kl = loss_dict["approx_kl"]
+                current_approx_kl = approx_kl_value
                 should_stop = (
                     self.target_kl is not None and current_approx_kl > self.target_kl
                 )
@@ -974,11 +998,9 @@ class PPO(RLAlgorithm):
                     mb_returns,
                     mb_old_values,
                 )
-                if mb_action_masks is not None:
-                    del mb_action_masks
                 if eval_hidden_state is not None:
                     del eval_hidden_state
-                del minibatch_td, loss_dict, loss
+                del loss_dict, loss
 
                 if should_stop:
                     warnings.warn(
@@ -986,7 +1008,9 @@ class PPO(RLAlgorithm):
                     )
                     break  # Break from minibatch loop for this epoch
 
-            # Note: Per-minibatch KL early stopping is handled inside the minibatch loop above
+        # Free large references after training step
+        del buffer_td
+        del advantages
 
     def _learn_from_rollout_buffer_bptt(self) -> None:
         """Learning procedure using truncated BPTT for recurrent networks."""
@@ -1054,6 +1078,9 @@ class PPO(RLAlgorithm):
         else:
             raise ValueError(f"Unknown BPTTSequenceType: {self.bptt_sequence_type}")
 
+        # Release candidate list as soon as it's no longer needed
+        del candidate_coords
+
         if not all_start_coords:
             warnings.warn("No BPTT sequences to sample. Skipping learning.")
             return
@@ -1082,6 +1109,15 @@ class PPO(RLAlgorithm):
                             seq_len=seq_len,
                             sequence_coords=current_coords_minibatch,
                             device=self.device,
+                            include_keys=[
+                                "observations",
+                                "actions",
+                                "log_probs",
+                                "advantages",
+                                "returns",
+                                "values",
+                                "action_masks",
+                            ],
                         )
                     )
 
@@ -1123,6 +1159,9 @@ class PPO(RLAlgorithm):
                     "initial_hidden_states", default=None
                 )
 
+                # Free the container as early as possible
+                del current_minibatch_td
+
                 current_step_hidden_state_actor = (
                     None  # For actor: {key: (layers, batch_seq_size, hidden_size)}
                 )
@@ -1134,6 +1173,10 @@ class PPO(RLAlgorithm):
                         key: val.permute(1, 0, 2).contiguous().detach().to(self.device)
                         for key, val in mb_initial_hidden_states_dict.items()
                     }
+
+                # Release raw initial hidden state dict once converted
+                if mb_initial_hidden_states_dict is not None:
+                    mb_initial_hidden_states_dict = None
 
                 with self.timing_tracker.time_context("bptt_loss_calculation_time"):
                     loss_dict = self.compute_loss(
@@ -1150,32 +1193,43 @@ class PPO(RLAlgorithm):
                     )
                 loss = loss_dict["loss"]
 
+                # Precompute scalar metrics to allow early frees
+                policy_loss_item = loss_dict["policy_loss"].item()
+                value_loss_item = loss_dict["value_loss"].item()
+                entropy_loss_item = loss_dict["entropy_loss"].item()
+                approx_kl_value = float(loss_dict["approx_kl"])  # scalar
+                clip_fraction_value = float(loss_dict["clip_fraction"])  # scalar
+
+                # EV using old values vs returns (avoid extra forward)
+                with torch.no_grad():
+                    ev = self._explained_variance(
+                        mb_old_values_seq.reshape(-1), mb_returns_seq.reshape(-1)
+                    )
+
+                # Free masks before backward
+                if mb_action_masks_seq is not None:
+                    del mb_action_masks_seq
+
                 with self.timing_tracker.time_context("bptt_backward_pass_time"):
-                    self.optimizer.zero_grad()
+                    self.optimizer.zero_grad(set_to_none=True)
                     loss.backward()  # Gradients accumulate over the sequence within this backward call
                     clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                     clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
                     self.optimizer.step()
 
-                # Track metrics for this minibatch
-                self.learn_metrics.add("total_loss", loss_dict["loss"].item())
-                self.learn_metrics.add("policy_loss", loss_dict["policy_loss"].item())
-                self.learn_metrics.add("value_loss", loss_dict["value_loss"].item())
-                self.learn_metrics.add("entropy_loss", loss_dict["entropy_loss"].item())
-                self.learn_metrics.add("approx_kl", loss_dict["approx_kl"])
-                self.learn_metrics.add("clip_fraction", loss_dict["clip_fraction"])
-
-                # Calculate explained variance using old values vs returns (simpler and doesn't need recomputation)
-                with torch.no_grad():
-                    returns_flat = mb_returns_seq.reshape(-1)
-                    values_flat = mb_old_values_seq.reshape(-1)
-                    ev = self._explained_variance(values_flat, returns_flat)
+                # Track metrics (use precomputed scalars)
+                self.learn_metrics.add("total_loss", loss.item())
+                self.learn_metrics.add("policy_loss", policy_loss_item)
+                self.learn_metrics.add("value_loss", value_loss_item)
+                self.learn_metrics.add("entropy_loss", entropy_loss_item)
+                self.learn_metrics.add("approx_kl", approx_kl_value)
+                self.learn_metrics.add("clip_fraction", clip_fraction_value)
                 self.learn_metrics.add("explained_variance", ev)
 
                 num_minibatches_this_epoch += 1
 
                 # Check KL divergence for early stopping using current minibatch value
-                current_approx_kl = loss_dict["approx_kl"]
+                current_approx_kl = approx_kl_value
                 should_stop = (
                     self.target_kl is not None and current_approx_kl > self.target_kl
                 )
@@ -1183,13 +1237,10 @@ class PPO(RLAlgorithm):
                 # Clean up BPTT minibatch tensors to free memory
                 del mb_obs_seq, mb_actions_seq, mb_old_log_probs_seq
                 del mb_advantages_seq, mb_returns_seq, mb_old_values_seq
-                if mb_action_masks_seq is not None:
-                    del mb_action_masks_seq
                 if current_step_hidden_state_actor is not None:
                     del current_step_hidden_state_actor
-                if mb_initial_hidden_states_dict is not None:
-                    del mb_initial_hidden_states_dict
-                del current_minibatch_td, loss_dict, loss
+
+                del loss_dict, loss
 
                 if should_stop:
                     warnings.warn(

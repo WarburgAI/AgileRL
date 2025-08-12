@@ -594,7 +594,10 @@ class RolloutBuffer:
             return self._convert_td_to_np_dict(flattened_td)
 
     def get_tensor_batch(
-        self, batch_size: Optional[int] = None, device: Optional[str] = None
+        self,
+        batch_size: Optional[int] = None,
+        device: Optional[str] = None,
+        include_keys: Optional[List[str]] = None,
     ) -> Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]]:
         """
         Get data from the buffer as PyTorch tensors, flattened and optionally sampled.
@@ -626,6 +629,19 @@ class RolloutBuffer:
         # New batch_size will be [buffer_size * num_envs]
         # .view(-1) is crucial for not creating a copy if possible
         flattened_td: TensorDict = valid_buffer_data_view.view(-1)
+
+        # Optionally select only a subset of keys to reduce memory / transfer
+        if include_keys is not None:
+            try:
+                existing_keys = set(
+                    valid_buffer_data_view.keys(include_nested=True, leaves_only=False)
+                )
+            except TypeError:
+                # Fallback for older tensordict versions
+                existing_keys = set(valid_buffer_data_view.keys())
+            filtered = [k for k in include_keys if k in existing_keys]
+            if filtered:
+                flattened_td = flattened_td.select(*filtered)
 
         if batch_size is not None:
             if batch_size > total_samples:
@@ -846,6 +862,7 @@ class RolloutBuffer:
             Tuple[int, int]
         ],  # List of (env_idx, time_idx_in_env_rollout)
         device: Optional[str] = None,
+        include_keys: Optional[List[str]] = None,
     ) -> TensorDict:
         """
         Returns a TensorDict with batched sequences for specific, pre-determined
@@ -893,6 +910,22 @@ class RolloutBuffer:
         # self.buffer has batch_dims (capacity, num_envs).
         # The resulting sequences_td_cpu will have batch_dims (actual_batch_size, seq_len) and be on CPU.
         sequences_td_cpu = self.buffer[time_indices, env_indices_expanded]
+
+        # Optionally reduce to only needed keys for this training step
+        if include_keys is not None:
+            # Ensure hidden_states is available if we are recurrent and need initial states
+            effective_include = list(include_keys)
+            if self.recurrent and "hidden_states" not in effective_include:
+                effective_include.append("hidden_states")
+            try:
+                existing_keys_seq = set(
+                    sequences_td_cpu.keys(include_nested=True, leaves_only=False)
+                )
+            except TypeError:
+                existing_keys_seq = set(sequences_td_cpu.keys())
+            filtered_seq = [k for k in effective_include if k in existing_keys_seq]
+            if filtered_seq:
+                sequences_td_cpu = sequences_td_cpu.select(*filtered_seq)
 
         # Handle initial hidden states if recurrent
         if self.recurrent and "hidden_states" in sequences_td_cpu.keys(
