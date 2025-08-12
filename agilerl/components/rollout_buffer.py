@@ -127,23 +127,28 @@ class RolloutBuffer:
         if isinstance(self.action_space, spaces.Discrete):
             action_shape = ()
             action_dtype = torch.int64
+            mask_dim = int(self.action_space.n)
         elif isinstance(self.action_space, spaces.Box):
             action_shape = self.action_space.shape
             action_dtype = convert_np_to_torch_dtype(
                 self.action_space.dtype
             )  # Convert numpy dtype to torch dtype
+            mask_dim = 0  # no mask support for Box
         elif isinstance(self.action_space, spaces.MultiDiscrete):
             action_shape = (len(self.action_space.nvec),)
             action_dtype = torch.int64
+            mask_dim = int(np.sum(self.action_space.nvec))
         elif isinstance(self.action_space, spaces.MultiBinary):
             action_shape = (self.action_space.n,)
             action_dtype = torch.int64
+            mask_dim = int(self.action_space.n)
         else:
             try:
                 action_shape = self.action_space.shape
                 action_dtype = convert_np_to_torch_dtype(
                     getattr(self.action_space, "dtype", np.float32)
                 )  # Convert numpy dtype to torch dtype
+                mask_dim = 0
             except AttributeError:
                 raise TypeError(
                     f"Unsupported action space type without shape: {type(self.action_space)}"
@@ -195,6 +200,9 @@ class RolloutBuffer:
                     (self.capacity, self.num_envs), dtype=torch.float32
                 ),
                 "dones": torch.zeros((self.capacity, self.num_envs), dtype=torch.bool),
+                "timeouts": torch.zeros(
+                    (self.capacity, self.num_envs), dtype=torch.bool
+                ),
                 "values": torch.zeros(
                     (self.capacity, self.num_envs), dtype=torch.float32
                 ),
@@ -212,6 +220,11 @@ class RolloutBuffer:
                 ),
             }
         )
+        # Optional action masks (all-true by default = all actions legal)
+        if mask_dim > 0:
+            source_dict["action_masks"] = torch.ones(
+                (self.capacity, self.num_envs, mask_dim), dtype=torch.bool
+            )
 
         if self.recurrent:
             if self.hidden_state_architecture is None:
@@ -258,6 +271,8 @@ class RolloutBuffer:
             Dict[str, ArrayOrTensor]
         ] = None,  # Not used if only initial hidden states are stored
         episode_start: Optional[Union[bool, np.ndarray]] = None,
+        action_mask: Optional[ArrayOrTensor] = None,
+        timeouts: Optional[Union[bool, np.ndarray]] = None,
     ) -> None:
         """
         Add a new batch of observations and associated data from vectorized environments to the buffer.
@@ -282,6 +297,8 @@ class RolloutBuffer:
         :type next_hidden_state: Optional[Dict[str, ArrayOrTensor]]
         :param episode_start: Episode start flag batch (shape: (num_envs,)), defaults to None
         :type episode_start: Optional[Union[bool, np.ndarray]]
+        :param action_mask: Optional action mask for this step (shape: (num_envs, mask_dim)), defaults to None
+        :type action_mask: Optional[ArrayOrTensor]
         """
         if self.pos == self.capacity:
             if self.wrap_at_capacity:
@@ -340,6 +357,12 @@ class RolloutBuffer:
         done_tensor = torch.as_tensor(done, dtype=torch.bool, device="cpu")
         current_step_data["dones"] = done_tensor.reshape(self.num_envs)
 
+        # Timeouts (treat missing as False)
+        if timeouts is None:
+            timeouts = np.zeros(self.num_envs, dtype=bool)
+        timeouts_tensor = torch.as_tensor(timeouts, dtype=torch.bool, device="cpu")
+        current_step_data["timeouts"] = timeouts_tensor.reshape(self.num_envs)
+
         # Values
         value_tensor = torch.as_tensor(value, dtype=torch.float32, device="cpu")
         current_step_data["values"] = value_tensor.reshape(self.num_envs)
@@ -397,6 +420,18 @@ class RolloutBuffer:
                     1, 0, 2
                 )  # Shape: (num_envs, layers, size)
 
+        # Action masks (optional)
+        if "action_masks" in self.buffer.keys(True) and action_mask is not None:
+            am = torch.as_tensor(action_mask, dtype=torch.bool, device="cpu")
+            if am.ndim == 1:
+                am = am.unsqueeze(0)  # (mask_dim,) -> (1, mask_dim)
+            current_step_data["action_masks"] = am.reshape(self.num_envs, -1)
+        elif "action_masks" in self.buffer.keys(True):
+            # default to all-true if not provided at this step
+            current_step_data["action_masks"] = torch.ones(
+                self.num_envs, self.buffer["action_masks"].shape[-1], dtype=torch.bool
+            )
+
         # Create a TensorDict for the current step's data
         # This will have batch_size [num_envs]
         current_td_slice = TensorDict(
@@ -415,7 +450,10 @@ class RolloutBuffer:
             self.full = True
 
     def compute_returns_and_advantages(
-        self, last_value: ArrayOrTensor, last_done: ArrayOrTensor
+        self,
+        last_value: ArrayOrTensor,
+        last_done: ArrayOrTensor,
+        last_timeout: Optional[ArrayOrTensor] = None,
     ) -> None:
         """
         Compute returns and advantages for the stored experiences using GAE or Monte Carlo.
@@ -446,16 +484,36 @@ class RolloutBuffer:
         # Slicing to buffer_size for all components.
         rewards_np = self.buffer["rewards"][:buffer_size].cpu().numpy()
         dones_np = self.buffer["dones"][:buffer_size].cpu().numpy()
+        timeouts_np = (
+            self.buffer["timeouts"][:buffer_size].cpu().numpy()
+            if "timeouts" in self.buffer.keys()
+            else np.zeros_like(dones_np)
+        )
         values_np = self.buffer["values"][:buffer_size].cpu().numpy()
+
+        # For time-limit bootstrapping: terminals are actual episode ends (not timeouts)
+        # Timeouts should bootstrap from next value
+        terminals_np = dones_np & ~timeouts_np
 
         if self.use_gae:
             last_gae_lambda = np.zeros(self.num_envs, dtype=np.float32)
             for t in reversed(range(buffer_size)):
                 if t == buffer_size - 1:
-                    next_non_terminal = 1.0 - last_done_np.astype(float)
+                    # Handle last step: only terminal if done AND not timeout
+                    last_timeout_np = (
+                        last_timeout.cpu().numpy().reshape(self.num_envs)
+                        if isinstance(last_timeout, torch.Tensor)
+                        else (
+                            np.asarray(last_timeout).reshape(self.num_envs)
+                            if last_timeout is not None
+                            else np.zeros(self.num_envs, dtype=bool)
+                        )
+                    )
+                    last_terminal = last_done_np & ~last_timeout_np
+                    next_non_terminal = 1.0 - last_terminal.astype(float)
                     next_values = last_value_np.astype(float)
                 else:
-                    next_non_terminal = 1.0 - dones_np[t + 1].astype(float)
+                    next_non_terminal = 1.0 - terminals_np[t + 1].astype(float)
                     next_values = values_np[t + 1]
 
                 delta = (
@@ -470,13 +528,23 @@ class RolloutBuffer:
             returns_np = advantages_np + values_np
         else:
             # Monte Carlo returns
+            last_timeout_np = (
+                last_timeout.cpu().numpy().reshape(self.num_envs)
+                if isinstance(last_timeout, torch.Tensor)
+                else (
+                    np.asarray(last_timeout).reshape(self.num_envs)
+                    if last_timeout is not None
+                    else np.zeros(self.num_envs, dtype=bool)
+                )
+            )
+            last_terminal = last_done_np & ~last_timeout_np
             last_returns_np = last_value_np.astype(float) * (
-                1.0 - last_done_np.astype(float)
+                1.0 - last_terminal.astype(float)
             )
             for t in reversed(range(buffer_size)):
                 returns_np[t] = last_returns_np = rewards_np[
                     t
-                ] + self.gamma * last_returns_np * (1.0 - dones_np[t].astype(float))
+                ] + self.gamma * last_returns_np * (1.0 - terminals_np[t].astype(float))
             advantages_np = returns_np - values_np
 
         # Assign computed advantages and returns back to the TensorDict
@@ -526,7 +594,10 @@ class RolloutBuffer:
             return self._convert_td_to_np_dict(flattened_td)
 
     def get_tensor_batch(
-        self, batch_size: Optional[int] = None, device: Optional[str] = None
+        self,
+        batch_size: Optional[int] = None,
+        device: Optional[str] = None,
+        include_keys: Optional[List[str]] = None,
     ) -> Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]]:
         """
         Get data from the buffer as PyTorch tensors, flattened and optionally sampled.
@@ -558,6 +629,19 @@ class RolloutBuffer:
         # New batch_size will be [buffer_size * num_envs]
         # .view(-1) is crucial for not creating a copy if possible
         flattened_td: TensorDict = valid_buffer_data_view.view(-1)
+
+        # Optionally select only a subset of keys to reduce memory / transfer
+        if include_keys is not None:
+            try:
+                existing_keys = set(
+                    valid_buffer_data_view.keys(include_nested=True, leaves_only=False)
+                )
+            except TypeError:
+                # Fallback for older tensordict versions
+                existing_keys = set(valid_buffer_data_view.keys())
+            filtered = [k for k in include_keys if k in existing_keys]
+            if filtered:
+                flattened_td = flattened_td.select(*filtered)
 
         if batch_size is not None:
             if batch_size > total_samples:
@@ -778,6 +862,7 @@ class RolloutBuffer:
             Tuple[int, int]
         ],  # List of (env_idx, time_idx_in_env_rollout)
         device: Optional[str] = None,
+        include_keys: Optional[List[str]] = None,
     ) -> TensorDict:
         """
         Returns a TensorDict with batched sequences for specific, pre-determined
@@ -825,6 +910,22 @@ class RolloutBuffer:
         # self.buffer has batch_dims (capacity, num_envs).
         # The resulting sequences_td_cpu will have batch_dims (actual_batch_size, seq_len) and be on CPU.
         sequences_td_cpu = self.buffer[time_indices, env_indices_expanded]
+
+        # Optionally reduce to only needed keys for this training step
+        if include_keys is not None:
+            # Ensure hidden_states is available if we are recurrent and need initial states
+            effective_include = list(include_keys)
+            if self.recurrent and "hidden_states" not in effective_include:
+                effective_include.append("hidden_states")
+            try:
+                existing_keys_seq = set(
+                    sequences_td_cpu.keys(include_nested=True, leaves_only=False)
+                )
+            except TypeError:
+                existing_keys_seq = set(sequences_td_cpu.keys())
+            filtered_seq = [k for k in effective_include if k in existing_keys_seq]
+            if filtered_seq:
+                sequences_td_cpu = sequences_td_cpu.select(*filtered_seq)
 
         # Handle initial hidden states if recurrent
         if self.recurrent and "hidden_states" in sequences_td_cpu.keys(

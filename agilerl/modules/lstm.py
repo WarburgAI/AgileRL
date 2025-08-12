@@ -58,25 +58,29 @@ class EvolvableLSTM(EvolvableModule):
     ):
         super().__init__(device, random_seed)
 
-        assert input_size > 0, (
-            "'input_size' cannot be less than or equal to zero, please enter a valid integer."
-        )
-        assert hidden_state_size > 0, (
-            "'hidden_state_size' cannot be less than or equal to zero, please enter a valid integer."
-        )
-        assert num_outputs > 0, (
-            "'num_outputs' cannot be less than or equal to zero, please enter a valid integer."
-        )
-        assert num_layers > 0, (
-            "'num_layers' cannot be less than or equal to zero, please enter a valid integer."
-        )
-        assert min_hidden_state_size < max_hidden_state_size, (
-            "'min_hidden_state_size' must be less than 'max_hidden_state_size'."
-        )
+        assert (
+            input_size > 0
+        ), "'input_size' cannot be less than or equal to zero, please enter a valid integer."
+        assert (
+            hidden_state_size > 0
+        ), "'hidden_state_size' cannot be less than or equal to zero, please enter a valid integer."
+        assert (
+            num_outputs > 0
+        ), "'num_outputs' cannot be less than or equal to zero, please enter a valid integer."
+        assert (
+            num_layers > 0
+        ), "'num_layers' cannot be less than or equal to zero, please enter a valid integer."
+        assert (
+            min_hidden_state_size < max_hidden_state_size
+        ), "'min_hidden_state_size' must be less than 'max_hidden_state_size'."
         assert min_layers < max_layers, "'min_layers' must be less than 'max_layers'."
         assert 0 <= dropout < 1, "'dropout' must be between 0 and 1."
 
+        # NOTE: 'name' determines the hidden-state key prefix (e.g., f"{name}_h"/f"{name}_c").
+        # If this module is used in multiple encoders (actor/critic), ensure unique names
+        # are provided by callers to avoid key collisions.
         self.name = name
+
         self.input_size = input_size
         self.hidden_state_size = hidden_state_size
         self.num_outputs = num_outputs
@@ -245,7 +249,7 @@ class EvolvableLSTM(EvolvableModule):
 
     def get_output_dense(self) -> torch.nn.Module:
         """Returns output layer of neural network."""
-        return self.model[f"{self.name}_linear_output"]
+        return self.model[f"{self.name}_lstm_output"]
 
     @mutation(MutationType.LAYER)
     def add_layer(self) -> None:

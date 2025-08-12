@@ -450,10 +450,18 @@ class StochasticActor(EvolvableNetwork):
 
         features_flat = features_seq.reshape(batch_size * seq_len, -1)
 
-        # Pass flattened features to the distribution head
+        action_mask_flat = None
+        if action_mask is not None:
+            # Expect [B, T, ...] -> [B*T, ...]
+            if isinstance(action_mask, torch.Tensor):
+                action_mask_flat = action_mask.reshape(batch_size * seq_len, -1)
+            else:
+                am = torch.as_tensor(action_mask)
+                action_mask_flat = am.reshape(batch_size * seq_len, -1)
+
         actions_flat, log_probs_flat, entropies_flat = self.forward_head(
             features_flat,
-            action_mask=action_mask,
+            action_mask=action_mask_flat,
             sample=sample,
             deterministic=deterministic,
         )

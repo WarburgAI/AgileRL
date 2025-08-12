@@ -91,7 +91,6 @@ class OptimizerWrapper:
         network_names: Optional[List[str]] = None,
         lr_name: Optional[str] = None,
     ) -> None:
-
         self.optimizer_cls = optimizer_cls
         self.optimizer_kwargs = optimizer_kwargs if optimizer_kwargs is not None else {}
         self.lr = lr
@@ -108,9 +107,9 @@ class OptimizerWrapper:
         # NOTE: This should be passed when reintializing the optimizer
         # when mutating an individual.
         if network_names is not None:
-            assert (
-                lr_name is not None
-            ), "Learning rate attribute name must be passed along with the network names."
+            assert lr_name is not None, (
+                "Learning rate attribute name must be passed along with the network names."
+            )
             self.network_names = network_names
             self.lr_name = lr_name
         else:
@@ -141,12 +140,12 @@ class OptimizerWrapper:
 
         # Single-agent algorithms with multiple networks for a single optimizer
         elif len(self.networks) > 1 and multiple_attrs:
-            assert len(self.networks) == len(
-                self.network_names
-            ), "Number of networks and network attribute names do not match."
-            assert isinstance(
-                optimizer_cls, type
-            ), "Expected a single optimizer class for multiple networks."
+            assert len(self.networks) == len(self.network_names), (
+                "Number of networks and network attribute names do not match."
+            )
+            assert isinstance(optimizer_cls, type), (
+                "Expected a single optimizer class for multiple networks."
+            )
             # Initialize a single optimizer from the combination of network parameters
             self.optimizer = init_from_multiple(
                 self.networks, optimizer_cls, self.lr, self.optimizer_kwargs
@@ -154,12 +153,12 @@ class OptimizerWrapper:
 
         # Single-agent algorithms with a single network for a single optimizer
         else:
-            assert isinstance(
-                optimizer_cls, type
-            ), "Expected a single optimizer class for a single network."
-            assert isinstance(
-                self.optimizer_kwargs, dict
-            ), "Expected a single dictionary of optimizer keyword arguments."
+            assert isinstance(optimizer_cls, type), (
+                "Expected a single optimizer class for a single network."
+            )
+            assert isinstance(self.optimizer_kwargs, dict), (
+                "Expected a single dictionary of optimizer keyword arguments."
+            )
 
             self.optimizer = init_from_single(
                 self.networks[0], optimizer_cls, self.lr, self.optimizer_kwargs
@@ -269,13 +268,15 @@ class OptimizerWrapper:
             assert (
                 isinstance(state_dict, dict)
                 and state_dict.keys() == self.optimizer.keys()
-            ), "Expected a dictionary of optimizer state dictionaries for multi-agent optimizers."
+            ), (
+                "Expected a dictionary of optimizer state dictionaries for multi-agent optimizers."
+            )
             for agent_id, opt in self.optimizer.items():
                 opt.load_state_dict(state_dict[agent_id])
         else:
-            assert isinstance(
-                state_dict, dict
-            ), "Expected a single optimizer state dictionary for single-agent optimizers."
+            assert isinstance(state_dict, dict), (
+                "Expected a single optimizer state dictionary for single-agent optimizers."
+            )
 
             self.optimizer.load_state_dict(state_dict)
 
@@ -322,7 +323,7 @@ class OptimizerWrapper:
             f"{name}_kwargs": self.optimizer_kwargs,
         }
 
-    def zero_grad(self) -> None:
+    def zero_grad(self, set_to_none: bool = False) -> None:
         """
         Zero the gradients of the optimizer.
         """
@@ -332,7 +333,12 @@ class OptimizerWrapper:
                 "a multi-agent algorithm."
             )
         else:
-            self.optimizer.zero_grad()
+            # set_to_none saves memory by setting grads to None instead of zeros
+            try:
+                self.optimizer.zero_grad(set_to_none=set_to_none)
+            except TypeError:
+                # Fallback for older optimizers without the argument
+                self.optimizer.zero_grad()
 
     def step(self) -> None:
         """

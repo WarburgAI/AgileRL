@@ -1,9 +1,7 @@
 """Functions for collecting rollouts for on-policy algorithms."""
 
-import numpy as np
-import time
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -61,6 +59,7 @@ class RolloutHook(ABC):
         next_obs,
         hidden_state,
         step_data: Dict[str, Any],
+        timeout=None,
     ) -> Dict[str, Any]:
         """Prepare data for buffer addition."""
         return {
@@ -72,6 +71,7 @@ class RolloutHook(ABC):
             "log_prob": log_prob,
             "next_obs": next_obs,
             "hidden_state": hidden_state,
+            "timeouts": timeout,
             **step_data,
         }
 
@@ -93,6 +93,8 @@ class RolloutHook(ABC):
             next_obs=buffer_data["next_obs"],
             hidden_state=buffer_data["hidden_state"],
             episode_start=np.atleast_1d(buffer_data["episode_start"]),
+            action_mask=buffer_data.get("action_mask", None),
+            timeouts=buffer_data.get("timeouts", np.zeros(agent.num_envs, dtype=bool)),
         )
 
     def on_episode_end(
@@ -187,6 +189,7 @@ class ICMHook(RolloutHook):
             hidden_state=buffer_data["hidden_state"],
             encoder_out=encoder_output_np,
             episode_start=np.atleast_1d(buffer_data["episode_start"]),
+            timeouts=buffer_data.get("timeouts", np.zeros(agent.num_envs, dtype=bool)),
         )
 
 
@@ -226,6 +229,7 @@ class CVARHook(RolloutHook):
         next_obs,
         hidden_state,
         step_data: Dict[str, Any],
+        timeout=None,
     ) -> Dict[str, Any]:
         # CVAR-specific: accumulate episode returns first
         agent._episode_returns += np.asarray(reward, dtype=np.float32)
@@ -275,6 +279,7 @@ class CVARHook(RolloutHook):
             "log_prob": np.asarray(log_prob, dtype=np.float32).reshape(-1),
             "next_obs": next_obs,
             "hidden_state": hidden_state,
+            "timeouts": timeout,
             "update": updates,
         }
 
@@ -291,6 +296,7 @@ class CVARHook(RolloutHook):
             next_obs=buffer_data["next_obs"],
             hidden_state=buffer_data["hidden_state"],
             episode_start=buffer_data["episode_start"],
+            timeouts=buffer_data.get("timeouts", np.zeros(agent.num_envs, dtype=bool)),
         )
 
     def on_episode_end(
@@ -343,6 +349,24 @@ def get_rollout_hooks(agent) -> List[RolloutHook]:
     hooks.append(StandardPPOHook())
 
     return hooks
+
+
+def _extract_timeouts(info, num_envs):
+    """Extract timeout flags from environment info."""
+    if (
+        isinstance(info, (list, np.ndarray))
+        and len(info) == num_envs
+        and all(isinstance(i, dict) for i in info)
+    ):
+        return np.array(
+            [bool(d.get("TimeLimit.truncated", False)) for d in info], dtype=bool
+        )
+    if isinstance(info, dict):
+        # For single environment, broadcast to all environments
+        return np.full(
+            num_envs, bool(info.get("TimeLimit.truncated", False)), dtype=bool
+        )
+    return np.zeros(num_envs, dtype=bool)
 
 
 def _collect_rollouts(
@@ -427,17 +451,35 @@ def _collect_rollouts(
             for hook in hooks:
                 step_data = hook.on_step_start(agent, obs, info, step_data)
 
+            # Build action mask robustly for vectorized infos
+            action_mask = None
+            if (
+                isinstance(info, (list, np.ndarray))
+                and len(info) == agent.num_envs
+                and all(isinstance(i, dict) for i in info)
+            ):
+                masks = [env_info.get("action_mask") for env_info in info]
+                if all(m is not None for m in masks):
+                    try:
+                        action_mask = np.stack(masks)
+                    except Exception:
+                        action_mask = None
+                elif any(m is not None for m in masks):
+                    action_mask = None
+            elif isinstance(info, dict):
+                action_mask = info.get("action_mask", None)
+
+            step_data["action_mask"] = action_mask
+
             # Get action, statistics and (maybe) recurrent hidden state from agent
             if recurrent:
                 action_result = agent.get_action(
                     obs,
-                    action_mask=info.get("action_mask", None),
+                    action_mask=action_mask,
                     hidden_state=current_hidden_state_for_actor,
                 )
             else:
-                action_result = agent.get_action(
-                    obs, action_mask=info.get("action_mask", None)
-                )
+                action_result = agent.get_action(obs, action_mask=action_mask)
 
             # Process action result through hooks
             processed_result = primary_hook.process_action_result(
@@ -492,6 +534,9 @@ def _collect_rollouts(
                 agent, reward, obs, next_obs, action, step_data
             )
 
+            # Detect time-limit truncation from info (Gymnasium/TimeLimit)
+            timeout_flags = _extract_timeouts(next_info, agent.num_envs)
+
             # Check if termination condition is met
             if isinstance(term, (list, np.ndarray)):
                 is_terminal = (
@@ -514,6 +559,7 @@ def _collect_rollouts(
                 next_obs,
                 current_hidden_state_for_buffer,
                 step_data,
+                timeout=timeout_flags,
             )
 
             buffer_data["episode_start"] = last_episode_starts
@@ -524,8 +570,13 @@ def _collect_rollouts(
             done = np.atleast_1d(is_terminal)
             done = done.astype(bool)
 
+            # Update episode starts for next step
+            last_episode_starts = done
+
             if recurrent and np.any(done):
-                finished_mask = done.astype(bool)
+                finished_mask = torch.as_tensor(
+                    done, dtype=torch.bool, device=agent.device
+                )
                 initial_hidden_states_for_reset = agent.get_initial_hidden_state(
                     agent.num_envs
                 )
@@ -535,9 +586,10 @@ def _collect_rollouts(
                             :, finished_mask, :
                         ]
                         if reset_states_for_key.shape[1] > 0:
-                            agent.hidden_state[key][:, finished_mask, :] = (
-                                reset_states_for_key
-                            )
+                            # Detach to prevent gradient accumulation across episodes
+                            agent.hidden_state[key][
+                                :, finished_mask, :
+                            ] = reset_states_for_key.detach()
 
             # Handle episode endings through hooks
             for hook in hooks:
@@ -559,8 +611,11 @@ def _collect_rollouts(
         for hook in hooks:
             hook.on_rollout_end(agent, env, step_data)
 
-        # Store the last observation and info for potential continuation
+        # Store the last observation, info, done, and scores for potential continuation
         agent._last_obs = (obs, info)
+        agent._last_done = done
+        agent._last_scores = scores
+        agent._last_info = info
 
         # Calculate last value to compute returns and advantages properly
         with torch.no_grad():
@@ -576,11 +631,13 @@ def _collect_rollouts(
             last_value = action_result[3]
 
             last_value = last_value.cpu().numpy()
-            last_done = np.atleast_1d(term)
-            last_done = last_done.astype(bool)
+            last_done = np.atleast_1d(done).astype(bool)
+
+        # Get last timeout info if available
+        last_timeout = _extract_timeouts(info, agent.num_envs)
 
         agent.rollout_buffer.compute_returns_and_advantages(
-            last_value=last_value, last_done=last_done
+            last_value=last_value, last_done=last_done, last_timeout=last_timeout
         )
 
     # Update timing metrics using the timing tracker
@@ -619,20 +676,22 @@ def collect_rollouts(
     :return: The list of scores for the episodes completed in the rollouts
     :rtype: List[float]
     """
-    # Use stored state if not resetting and available
-    last_obs, last_info = (
-        agent._last_obs
-        if hasattr(agent, "_last_obs") and agent._last_obs
-        else (None, None)
-    )
+    # Extract last state if continuing from previous rollout
+    last_obs_info = getattr(agent, "_last_obs", None)
+    if last_obs_info is None:
+        last_obs, last_info = None, None
+    else:
+        last_obs, last_info = last_obs_info
+    last_done = getattr(agent, "_last_done", None)
+    last_scores = getattr(agent, "_last_scores", None)
 
     completed_scores, _, _, _, _ = _collect_rollouts(
         agent,
         env,
         n_steps,
         last_obs=last_obs,
-        last_done=None,
-        last_scores=None,
+        last_done=last_done,
+        last_scores=last_scores,
         last_info=last_info,
         recurrent=False,
         reset_on_collect=reset_on_collect,
@@ -668,20 +727,22 @@ def collect_rollouts_recurrent(
     :return: The list of scores for the episodes completed in the rollouts
     :rtype: List[float]
     """
-    # Use stored state if not resetting and available
-    last_obs, last_info = (
-        agent._last_obs
-        if hasattr(agent, "_last_obs") and agent._last_obs
-        else (None, None)
-    )
+    # Extract last state if continuing from previous rollout
+    last_obs_info = getattr(agent, "_last_obs", None)
+    if last_obs_info is None:
+        last_obs, last_info = None, None
+    else:
+        last_obs, last_info = last_obs_info
+    last_done = getattr(agent, "_last_done", None)
+    last_scores = getattr(agent, "_last_scores", None)
 
     completed_scores, _, _, _, _ = _collect_rollouts(
         agent,
         env,
         n_steps,
         last_obs=last_obs,
-        last_done=None,
-        last_scores=None,
+        last_done=last_done,
+        last_scores=last_scores,
         last_info=last_info,
         recurrent=True,
         reset_on_collect=reset_on_collect,

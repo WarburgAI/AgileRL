@@ -343,6 +343,7 @@ def create_population(
                 gae_lambda=INIT_HP.get("GAE_LAMBDA", 0.95),
                 action_std_init=INIT_HP.get("ACTION_STD_INIT", 0.6),
                 clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
+                vf_clip_param=INIT_HP.get("VF_CLIP_PARAM"),
                 ent_coef=INIT_HP.get("ENT_COEF", 0.01),
                 vf_coef=INIT_HP.get("VF_COEF", 0.5),
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.5),
