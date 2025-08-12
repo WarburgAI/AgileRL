@@ -12,9 +12,12 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 from tensordict import TensorDict
 from torch.nn.functional import mse_loss
+from gymnasium import spaces
 
+from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.algorithms.icm_ppo import ICM_PPO
 from agilerl.components.icm import ICM
+from agilerl.typing import BPTTSequenceType
 
 
 class RunningMeanStd:
@@ -74,8 +77,15 @@ class PBIM_ICM(ICM):
     :param kwargs: Keyword arguments to pass to the ICM constructor.
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        *args,
+        **kwargs,
+    ):
+        super().__init__(
+            *args,
+            **kwargs,
+        )
 
     def compute_loss(
         self, *args, **kwargs
@@ -138,10 +148,94 @@ class PBIM_ICM_PPO(ICM_PPO):
     :param kwargs: Keyword arguments to pass to the ICM_PPO constructor.
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        observation_space: spaces.Space,
+        action_space: spaces.Space,
+        index: int = 0,
+        hp_config: Optional[HyperparameterConfig] = None,
+        net_config: Optional[Dict[str, Any]] = None,
+        batch_size: int = 64,
+        lr: float = 1e-4,
+        learn_step: int = 2048,
+        gamma: float = 0.99,
+        gae_lambda: float = 0.95,
+        mut: Optional[str] = None,
+        action_std_init: float = 0.0,
+        clip_coef: float = 0.2,
+        ent_coef: float = 0.01,
+        vf_coef: float = 0.5,
+        max_grad_norm: float = 0.5,
+        target_kl: Optional[float] = None,
+        normalize_images: bool = True,
+        update_epochs: int = 4,
+        actor_network: Optional[Any] = None,  # EvolvableModule
+        critic_network: Optional[Any] = None,  # EvolvableModule
+        share_encoders: bool = True,
+        num_envs: int = 1,
+        use_rollout_buffer: bool = True,  # Must be True for ICM_PPO current design
+        rollout_buffer_config: Optional[Dict[str, Any]] = {},
+        recurrent: bool = False,
+        device: str = "cpu",
+        accelerator: Optional[Any] = None,
+        wrap: bool = True,
+        torch_compiler: Optional[Any] = None,
+        bptt_sequence_type: BPTTSequenceType = BPTTSequenceType.FIFTY_PERCENT_OVERLAP,
+        # ICM specific parameters
+        icm_lr: float = 1e-4,
+        icm_beta: float = 0.2,
+        intrinsic_reward_weight: float = 0.1,  # eta in the paper
+        use_shared_encoder_for_icm: bool = False,
+        icm_encoder_net_config: Optional[Dict[str, Any]] = None,
+        icm_inverse_net_config: Optional[Dict[str, Any]] = None,
+        icm_forward_net_config: Optional[Dict[str, Any]] = None,
+        icm_loss_weight: float = 0.1,
+        pbim: bool = False,
+    ):
+        super().__init__(
+            observation_space=observation_space,
+            action_space=action_space,
+            index=index,
+            hp_config=hp_config,
+            net_config=net_config,
+            batch_size=batch_size,
+            lr=lr,
+            learn_step=learn_step,
+            gamma=gamma,
+            gae_lambda=gae_lambda,
+            mut=mut,
+            action_std_init=action_std_init,
+            clip_coef=clip_coef,
+            ent_coef=ent_coef,
+            vf_coef=vf_coef,
+            max_grad_norm=max_grad_norm,
+            target_kl=target_kl,
+            normalize_images=normalize_images,
+            update_epochs=update_epochs,
+            actor_network=actor_network,
+            critic_network=critic_network,
+            share_encoders=share_encoders,
+            num_envs=num_envs,
+            use_rollout_buffer=use_rollout_buffer,
+            rollout_buffer_config=rollout_buffer_config,
+            recurrent=recurrent,
+            device=device,
+            accelerator=accelerator,
+            wrap=wrap,
+            torch_compiler=torch_compiler,
+            bptt_sequence_type=bptt_sequence_type,
+            icm_lr=icm_lr,
+            icm_beta=icm_beta,
+            intrinsic_reward_weight=intrinsic_reward_weight,
+            use_shared_encoder_for_icm=use_shared_encoder_for_icm,
+            icm_encoder_net_config=icm_encoder_net_config,
+            icm_inverse_net_config=icm_inverse_net_config,
+            icm_forward_net_config=icm_forward_net_config,
+            icm_loss_weight=icm_loss_weight,
+            pbim=pbim,
+        )
 
-        self.pbim = kwargs.get("pbim", False)
+        self.pbim = pbim
 
         if self.pbim:
             self.reward_normalizer = RunningMeanStd(device=self.device)
@@ -288,7 +382,7 @@ class PBIM_ICM_PPO(ICM_PPO):
             _,  # icm_next_hidden_state
             pred_phi_next_state,  # This is used for our potential function Phi
         ) = self.icm.compute_loss(
-            obs_batch_t=obs_batch_t,
+            obs_batch=obs_batch_t,
             action_batch_t=action_batch_t,
             next_obs_batch_t=next_obs_batch_t,
             action_input=action_input,

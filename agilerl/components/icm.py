@@ -481,9 +481,9 @@ class ICM(EvolvableModule):
         self.accelerator = accelerator
         self.use_internal_encoder = use_internal_encoder
 
-        self.register_buffer("ri_mean", torch.zeros(1, device=device))
-        self.register_buffer("ri_var", torch.ones(1, device=device))
-        self.ri_momentum = 0.999  # EMA
+        # self.register_buffer("ri_mean", torch.zeros(1, device=device))
+        # self.register_buffer("ri_var", torch.ones(1, device=device))
+        # self.ri_momentum = 0.999  # EMA
 
         if not isinstance(
             action_space, (spaces.Discrete, spaces.MultiDiscrete, spaces.Box)
@@ -664,28 +664,28 @@ class ICM(EvolvableModule):
             action_batch_t = self._to_tensor(action_batch, dtype=dtype)
             action_input = actions_to_one_hot(action_batch_t, self.action_space)
 
-            pred_phi_next_obs = self.forward_model(phi_obs, action_input)
+            with torch.no_grad():
+                pred_phi_next_obs = self.forward_model(phi_obs, action_input)
 
             mse_per_feature = self.mse_loss_fn(pred_phi_next_obs, phi_next_obs)
-            r_i_raw = 0.5 * mse_per_feature.sum(dim=1)
-            self._update_intrinsic_stats(r_i_raw)
-            r_i = self.standardize_intrinsic(r_i_raw) * self.intrinsic_reward_weight
+            intrinsic_reward = 0.5 * mse_per_feature.sum(dim=1)
+            intrinsic_reward *= self.intrinsic_reward_weight
 
             returned_hidden_obs = hidden_state if self.is_recurrent else None
             returned_hidden_next_obs = next_hidden_state if self.is_recurrent else None
-            return r_i, returned_hidden_obs, returned_hidden_next_obs
+            return intrinsic_reward, returned_hidden_obs, returned_hidden_next_obs
 
-    def _update_intrinsic_stats(self, r_i_raw):
-        # r_i_raw: (B,)
-        with torch.no_grad():
-            mean = r_i_raw.mean()
-            var = r_i_raw.var(unbiased=False) + 1e-8
-            self.ri_mean.mul_(self.ri_momentum).add_((1 - self.ri_momentum) * mean)
-            self.ri_var.mul_(self.ri_momentum).add_((1 - self.ri_momentum) * var)
+    # def _update_intrinsic_stats(self, r_i_raw):
+    #     # r_i_raw: (B,)
+    #     with torch.no_grad():
+    #         mean = r_i_raw.mean()
+    #         var = r_i_raw.var(unbiased=False) + 1e-8
+    #         self.ri_mean.mul_(self.ri_momentum).add_((1 - self.ri_momentum) * mean)
+    #         self.ri_var.mul_(self.ri_momentum).add_((1 - self.ri_momentum) * var)
 
-    def standardize_intrinsic(self, r_i_raw):
-        r = (r_i_raw - self.ri_mean) / (self.ri_var.sqrt() + 1e-8)
-        return torch.clamp(r, max=3.0)
+    # def standardize_intrinsic(self, r_i_raw):
+    #     r = (r_i_raw - self.ri_mean) / (self.ri_var.sqrt() + 1e-8)
+    #     return torch.clamp(r, max=3.0)
 
     def update(
         self,
@@ -975,3 +975,4 @@ class ICM(EvolvableModule):
 
         # Prepend 'icm_encoder_' to distinguish from actor/critic hidden states
         return {f"icm_encoder_{k}": v for k, v in encoder_hidden.items()}
+
