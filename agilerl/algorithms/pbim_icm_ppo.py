@@ -69,9 +69,9 @@ class PBIM_ICM(ICM):
     An ICM module extension that supports PBIM by providing access to the
     forward model's prediction of the next state embedding.
 
-    This class inherits from the standard ICM module and overrides the
-    `compute_loss` method to return the predicted next state embedding,
-    which is used as the potential function in PBIM.
+    This class inherits from the standard ICM module and implements a
+    `compute_loss_and_next_state_embedding` method to return the predicted
+    next state embedding, which is used as the potential function in PBIM.
 
     :param args: Positional arguments to pass to the ICM constructor.
     :param kwargs: Keyword arguments to pass to the ICM constructor.
@@ -87,8 +87,16 @@ class PBIM_ICM(ICM):
             **kwargs,
         )
 
-    def compute_loss(
-        self, *args, **kwargs
+    def compute_loss_and_next_state_embedding(
+        self,
+        obs_batch_t: torch.Tensor,
+        action_batch_t: torch.Tensor,
+        next_obs_batch_t: torch.Tensor,
+        embedded_obs: Optional[torch.Tensor] = None,
+        embedded_next_obs: Optional[torch.Tensor] = None,
+        hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        hidden_state_next: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        action_input: Optional[torch.Tensor] = None,
     ) -> Tuple[
         torch.Tensor,
         torch.Tensor,
@@ -101,18 +109,26 @@ class PBIM_ICM(ICM):
         Computes the ICM loss and returns it along with intermediate values,
         including the predicted next state embedding from the forward model.
 
-        :param args: Positional arguments passed to the parent's compute_loss.
-        :param kwargs: Keyword arguments passed to the parent's compute_loss.
+        :param args: Positional arguments passed to the parent's compute_loss_and_next_state_embedding.
+        :param kwargs: Keyword arguments passed to the parent's compute_loss_and_next_state_embedding.
         :return: A tuple containing losses, hidden states, and the predicted next state.
         """
-        action_input = kwargs.pop("action_input", None)
-        action_batch_t = kwargs.pop("action_batch_t", None)
+        if not action_input:
+            action_input = ICM.actions_to_one_hot(action_batch_t, self.action_space)
+
         (
             phi_state,
             phi_next_state,
             hidden_state,
             hidden_state_next,
-        ) = self.embed_obs(*args, **kwargs)
+        ) = self.embed_obs(
+            obs_batch=obs_batch_t,
+            next_obs_batch=next_obs_batch_t,
+            embedded_obs=embedded_obs,
+            embedded_next_obs=embedded_next_obs,
+            hidden_state_obs=hidden_state,
+            hidden_state_next_obs=hidden_state_next,
+        )
 
         # Get predicted action
         pred_action = self.inverse_model(phi_state, phi_next_state)
@@ -261,13 +277,18 @@ class PBIM_ICM_PPO(ICM_PPO):
             obs_t = buffer_td["observations"][:-1]
             obs_tp = buffer_td["next_observations"][1:]
             act_t = buffer_td["actions"][:-1]
-
+            action_input = buffer_td["actions"][:-1]
+            hidden_state_obs = buffer_td["hidden_states"][:-1]
+            hidden_state_next_obs = buffer_td["hidden_states"][1:]
             emb_t = buffer_td["encoder_out"][:-1]
             emb_tp = buffer_td["encoder_out"][1:]
         else:
             obs_t = buffer_td["observations"]
             obs_tp = buffer_td["next_observations"]
             act_t = buffer_td["actions"]
+            action_input = buffer_td["actions"]
+            hidden_state_obs = buffer_td["icm_hidden_states"]
+            hidden_state_next_obs = buffer_td["icm_next_hidden_states"]
             emb_t = buffer_td["encoder_out"]
             emb_tp = buffer_td["encoder_out"]
 
@@ -279,33 +300,44 @@ class PBIM_ICM_PPO(ICM_PPO):
                 next_obs_batch=obs_tp,
                 embedded_obs=emb_t,
                 embedded_next_obs=emb_tp,
+                action_input=None,
+                hidden_state_obs=hidden_state_obs,
+                hidden_state_next_obs=hidden_state_next_obs,
             )
 
-        # Zero out potential for terminal states, as per PBRS for episodic tasks
-        dones = buffer_td["dones"]
-        next_potential = next_potential.masked_fill(dones, 0)
+            
+            next_potential = torch.concatenate([next_potential, torch.zeros((1, 1), dtype=next_potential.dtype, device=self.device)], dim=0)
+            potential = torch.concatenate([potential, torch.zeros((1, 1), dtype=potential.dtype, device=self.device)], dim=0)
+            
 
-        # Compute potential-based shaping reward F(s, s') = gamma * Phi(s') - Phi(s)
-        assert potential.shape == next_potential.shape, f"Potential shape: {potential.shape}, Next potential shape: {next_potential.shape}"
-        pbim_rewards = self.gamma * next_potential - potential
+            # Zero out potential for terminal states, as per PBRS for episodic tasks
+            dones = buffer_td["dones"].reshape(-1, 1)
+            
+            next_potential = next_potential.masked_fill(dones, 0)
+            potential = potential.masked_fill(dones, 0)
 
-        # Normalize the potential-based rewards
-        self.reward_normalizer.update(pbim_rewards)
-        normalized_pbim_rewards = pbim_rewards / torch.sqrt(
-            self.reward_normalizer.var + 1e-8
-        )
+            # Compute potential-based shaping reward F(s, s') = gamma * Phi(s') - Phi(s)
+            next_potential.mul_(self.gamma)
+            torch.add(next_potential, potential, alpha=-1.0, out=next_potential)  # next_potential - potential
+            # next_potential should now be called pbim_rewards, but we're doing it in-place to avoid temporaries
 
-        # out = torch.zeros_like(normalized_pbim_rewards)
-        # out[:, 1:] = normalized_pbim_rewards
-        # normalized_pbim_rewards = out
+            # Normalize the potential-based rewards (avoid temporaries)
+            self.reward_normalizer.update(next_potential)
+            denom = torch.sqrt(self.reward_normalizer.var + 1e-8)
+            torch.div(next_potential, denom, out=next_potential)
+            # next_potential is now normalized pbim_rewards
 
-        # Combine with extrinsic rewards
-        rewards = buffer_td["rewards"].to(self.device)
-        assert rewards.shape == normalized_pbim_rewards.shape, f"Rewards shape: {rewards.shape}, Normalized PBIM rewards shape: {normalized_pbim_rewards.shape}"
-        combined_rewards = (
-            rewards + self.intrinsic_reward_weight * normalized_pbim_rewards
-        )
-        buffer_td["rewards"] = combined_rewards.cpu()
+            # out = torch.zeros_like(normalized_pbim_rewards)
+            # out[:, 1:] = normalized_pbim_rewards
+            # normalized_pbim_rewards = out
+
+            # Combine with extrinsic rewards (in-place on a clone to reduce memory)
+            rewards = buffer_td["rewards"].unsqueeze(-1)
+            combined_rewards = rewards.clone()
+            combined_rewards.mul_(1 - self.intrinsic_reward_weight)
+            
+            combined_rewards.add_(next_potential, alpha=self.intrinsic_reward_weight)
+            buffer_td["rewards"] = combined_rewards.squeeze(-1).to(buffer_td["observations"].device)
 
         # Continue with standard PPO learning on the modified rewards
         return super()._learn_from_rollout_buffer_flat(buffer_td_external=buffer_td)
@@ -326,6 +358,9 @@ class PBIM_ICM_PPO(ICM_PPO):
             obs_t = buffer_td["observations"][:-1]
             obs_tp = buffer_td["next_observations"][1:]
             act_t = buffer_td["actions"][:-1]
+            action_input = buffer_td["actions"][:-1]
+            hidden_state_obs = buffer_td["hidden_states"][:-1]
+            hidden_state_next_obs = buffer_td["hidden_states"][1:]
 
             emb_t = buffer_td["encoder_out"][:-1]
             emb_tp = buffer_td["encoder_out"][1:]
@@ -335,10 +370,11 @@ class PBIM_ICM_PPO(ICM_PPO):
             act_t = buffer_td["actions"]
             emb_t = buffer_td["encoder_out"]
             emb_tp = buffer_td["encoder_out"]
+            action_input = buffer_td["actions"]
+            hidden_state_obs = buffer_td["icm_hidden_states"]
+            hidden_state_next_obs = buffer_td["icm_next_hidden_states"]
             
         num_sequences = obs_t.shape[0]
-            
-        rewards = buffer_td["rewards"]
 
         with torch.no_grad():
             potential, next_potential = self.get_potentials(
@@ -347,34 +383,44 @@ class PBIM_ICM_PPO(ICM_PPO):
                 next_obs_batch=obs_tp,
                 embedded_obs=emb_t,
                 embedded_next_obs=emb_tp,
+                action_input=None,
+                hidden_state_obs=hidden_state_obs,
+                hidden_state_next_obs=hidden_state_next_obs,
             )
+            
+            next_potential = torch.concatenate([next_potential, torch.zeros((1, 1), dtype=next_potential.dtype, device=self.device)], dim=0)
+            potential = torch.concatenate([potential, torch.zeros((1, 1), dtype=potential.dtype, device=self.device)], dim=0)
+            
 
-        # Zero out potential for terminal states
-        dones = buffer_td["dones"]
-        next_potential = next_potential.masked_fill(dones, 0)
+            # Zero out potential for terminal states
+            dones = buffer_td["dones"].reshape(-1, 1)
+            next_potential = next_potential.masked_fill(dones, 0)
+            potential = potential.masked_fill(dones, 0)
+            
 
-        # Compute potential-based shaping reward F(s, s') = gamma * Phi(s') - Phi(s)
-        pbim_rewards = self.gamma * next_potential - potential
+            # Compute potential-based shaping reward F(s, s') = gamma * Phi(s') - Phi(s)
+            next_potential.mul_(self.gamma)
+            torch.add(next_potential, potential, alpha=-1.0, out=next_potential)  # next_potential - potential
+            # next_potential should now be called pbim_rewards, but we're doing it in-place to avoid temporaries
+            
 
-        # Normalize the potential-based rewards
-        # Flatten for normalizer update, then reshape back
-        self.reward_normalizer.update(pbim_rewards)
-        normalized_pbim_rewards = pbim_rewards / torch.sqrt(
-            self.reward_normalizer.var + 1e-8
-        )
+            # Normalize the potential-based rewards (avoid temporaries)
+            self.reward_normalizer.update(next_potential)
+            denom = torch.sqrt(self.reward_normalizer.var + 1e-8)
+            torch.div(next_potential, denom, out=next_potential)
+            # next_potential is now normalized pbim_rewards
 
-        # out = torch.zeros_like(rewards)
-        # out[:, 1:] = normalized_pbim_rewards
-        # normalized_pbim_rewards = out
+            # out = torch.zeros_like(rewards)
+            # out[:, 1:] = normalized_pbim_rewards
+            # normalized_pbim_rewards = out
 
-        # Combine with extrinsic rewards
-        combined_rewards = (
-            rewards * (1 - self.intrinsic_reward_weight) + self.intrinsic_reward_weight * normalized_pbim_rewards
-        )
-        combined_rewards = combined_rewards.reshape(
-            self.rollout_buffer.capacity, self.num_envs, -1
-        )
-        buffer_td["rewards"] = combined_rewards.cpu()
+            # Combine with extrinsic rewards (scale and add in-place to reduce memory)
+            rewards = buffer_td["rewards"].unsqueeze(-1)
+            combined_rewards = rewards.clone()
+            combined_rewards.mul_(1 - self.intrinsic_reward_weight)
+            
+            combined_rewards.add_(next_potential, alpha=self.intrinsic_reward_weight)
+            buffer_td["rewards"] = combined_rewards.squeeze(-1).to(buffer_td["observations"].device)
 
         # Let the parent class handle the rest of the BPTT update
         return super()._learn_from_rollout_buffer_bptt()
@@ -388,6 +434,7 @@ class PBIM_ICM_PPO(ICM_PPO):
         embedded_next_obs: Optional[torch.Tensor] = None,
         hidden_state_obs: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         hidden_state_next_obs: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        action_input: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Computes the potential values for PBIM.
@@ -397,15 +444,12 @@ class PBIM_ICM_PPO(ICM_PPO):
 
         :return: A tuple containing the current potential Phi(s,a) and next potential Phi(s').
         """
-        obs_batch_t, action_batch_t, next_obs_batch_t = self.to_device(
-            obs_batch, action_batch, next_obs_batch
-        )
-
-        # Convert actions to appropriate format
-        # Use appropriate dtype based on action space type
         dtype = torch.float32 if self.icm.is_continuous_action else torch.long
-        action_batch_tensor = self.icm._to_tensor(action_batch_t, dtype=dtype)
-        action_input = ICM.actions_to_one_hot(action_batch_tensor, self.action_space)
+        action_batch_t = self.icm._to_tensor(action_batch, dtype=dtype)
+
+        obs_batch_t, action_batch_t, next_obs_batch_t = self.to_device(
+            obs_batch, action_batch_t, next_obs_batch
+        )
 
         (
             _,  # inverse_loss
@@ -414,15 +458,15 @@ class PBIM_ICM_PPO(ICM_PPO):
             _,  # icm_hidden_state
             _,  # icm_next_hidden_state
             pred_phi_next_state,  # This is used for our potential function Phi
-        ) = self.icm.compute_loss(
-            obs_batch=obs_batch_t,
-            # action_batch_t=action_batch_t,
-            next_obs_batch=next_obs_batch_t,
+        ) = self.icm.compute_loss_and_next_state_embedding(
+            obs_batch_t=obs_batch_t,
+            action_batch_t=action_batch_t,
+            next_obs_batch_t=next_obs_batch_t,
             action_input=action_input,
             embedded_obs=embedded_obs,
             embedded_next_obs=embedded_next_obs,
-            hidden_state_obs=hidden_state_obs,
-            hidden_state_next_obs=hidden_state_next_obs,
+            hidden_state=hidden_state_obs,
+            hidden_state_next=hidden_state_next_obs,
         )
 
         # The potential Phi(s,a) is derived from the predicted next state embedding

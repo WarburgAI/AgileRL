@@ -669,15 +669,15 @@ class ICM(EvolvableModule):
         dtype = torch.float32 if self.is_continuous_action else torch.long
         action_batch_t = self._to_tensor(action_batch, dtype=dtype)
 
-        action_input = actions_to_one_hot(action_batch_t, self.action_space)
+        action_input = ICM.actions_to_one_hot(action_batch_t, self.action_space)
 
         total_loss, loss_I, loss_F, returned_hidden_obs, returned_hidden_next_obs = (
             self.compute_loss(
                 obs_batch_t=obs_batch_t,
                 action_batch_t=action_batch_t,
                 next_obs_batch_t=next_obs_batch_t,
-                hidden_state_obs=hidden_state_obs,
-                hidden_state_next_obs=hidden_state_next_obs,
+                hidden_state=hidden_state_obs,
+                hidden_state_next=hidden_state_next_obs,
                 action_input=action_input,
             )
         )
@@ -765,7 +765,7 @@ class ICM(EvolvableModule):
             # Use appropriate dtype based on action space type
             dtype = torch.float32 if self.is_continuous_action else torch.long
             action_batch_tensor = self._to_tensor(action_batch_t, dtype=dtype)
-            action_input = actions_to_one_hot(action_batch_tensor, self.action_space)
+            action_input = ICM.actions_to_one_hot(action_batch_tensor, self.action_space)
 
         if self.is_continuous_action:
             # For continuous actions, use MSE loss
