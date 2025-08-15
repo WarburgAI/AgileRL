@@ -4,6 +4,7 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import numpy as np
 import torch
+import gc
 import torch.optim as optim
 from gymnasium import spaces
 from tensordict import TensorDict
@@ -811,6 +812,9 @@ class PPO(RLAlgorithm):
         self.last_learn_time = self.timing_tracker.end_timer("learn_total")
         self.total_learn_time += self.last_learn_time
 
+        # clear cache
+        gc.collect()
+
         # Clear CUDA cache after training to free memory
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.empty_cache()
@@ -1100,7 +1104,7 @@ class PPO(RLAlgorithm):
                 if not current_coords_minibatch:
                     continue
 
-                # Fetch minibatch of sequences; returns TensorDict on self.device
+                # Fetch minibatch of sequences; returns TensorDict on CPU (we'll move per-minibatch tensors to device)
                 # Batch_size: [len(current_coords_minibatch), seq_len]
                 # "initial_hidden_states" is a non-tensor entry in TD: Dict[str, Tensor(batch_seq_size, layers, size)]
                 with self.timing_tracker.time_context("get_sequences_batch_time"):
@@ -1108,7 +1112,7 @@ class PPO(RLAlgorithm):
                         self.rollout_buffer.get_specific_sequences_tensor_batch(
                             seq_len=seq_len,
                             sequence_coords=current_coords_minibatch,
-                            device=self.device,
+                            device="cpu",
                             include_keys=[
                                 "observations",
                                 "actions",
@@ -1131,26 +1135,20 @@ class PPO(RLAlgorithm):
                     warnings.warn("Skipping empty or invalid minibatch of sequences.")
                     continue
 
-                mb_obs_seq = current_minibatch_td[
-                    "observations"
-                ]  # Shape: (batch_seq, seq_len, *obs_dims) or nested TD
-                mb_actions_seq = current_minibatch_td[
-                    "actions"
-                ]  # Shape: (batch_seq, seq_len, *act_dims)
-                mb_old_log_probs_seq = current_minibatch_td[
-                    "log_probs"
-                ]  # Shape: (batch_seq, seq_len)
-                mb_advantages_seq = current_minibatch_td[
-                    "advantages"
-                ]  # Shape: (batch_seq, seq_len) (already normalized)
-                mb_returns_seq = current_minibatch_td[
-                    "returns"
-                ]  # Shape: (batch_seq, seq_len)
-                mb_old_values_seq = current_minibatch_td[
-                    "values"
-                ]  # Shape: (batch_seq, seq_len)
+                # Extract tensors on CPU and move only this minibatch's tensors to target device
+                obs_seq_cpu = current_minibatch_td["observations"]
+                if isinstance(obs_seq_cpu, dict):
+                    mb_obs_seq = {k: v.to(self.device) for k, v in obs_seq_cpu.items()}
+                else:
+                    mb_obs_seq = obs_seq_cpu.to(self.device)
+
+                mb_actions_seq = current_minibatch_td["actions"].to(self.device)
+                mb_old_log_probs_seq = current_minibatch_td["log_probs"].to(self.device)
+                mb_advantages_seq = current_minibatch_td["advantages"].to(self.device)
+                mb_returns_seq = current_minibatch_td["returns"].to(self.device)
+                mb_old_values_seq = current_minibatch_td["values"].to(self.device)
                 mb_action_masks_seq = (
-                    current_minibatch_td.get("action_masks")
+                    current_minibatch_td.get("action_masks").to(self.device)
                     if "action_masks" in current_minibatch_td.keys(include_nested=True)
                     else None
                 )

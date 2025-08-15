@@ -243,6 +243,7 @@ class RolloutBuffer:
                         self.hidden_state_architecture[key][2],  # hidden_size
                     ),
                     dtype=torch.float32,
+                    device="cpu",
                 )
                 for key in self.hidden_state_architecture.keys()
             }
@@ -416,9 +417,9 @@ class RolloutBuffer:
             # with {key: (num_envs, layers, size)}
             current_step_data["hidden_states"] = {}
             for key, ppo_tensor_val in hidden_state.items():
-                current_step_data["hidden_states"][key] = ppo_tensor_val.permute(
-                    1, 0, 2
-                )  # Shape: (num_envs, layers, size)
+                current_step_data["hidden_states"][key] = (
+                    ppo_tensor_val.permute(1, 0, 2).detach().cpu()
+                )  # Shape: (num_envs, layers, size); ensure CPU and no graph refs
 
         # Action masks (optional)
         if "action_masks" in self.buffer.keys(True) and action_mask is not None:
