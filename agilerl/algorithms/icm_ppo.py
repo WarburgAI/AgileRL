@@ -140,6 +140,7 @@ class ICM_PPO(RLAlgorithm):
         mut: Optional[str] = None,
         action_std_init: float = 0.0,
         clip_coef: float = 0.2,
+        vf_clip_param: Optional[float] = None,
         ent_coef: float = 0.01,
         vf_coef: float = 0.5,
         max_grad_norm: float = 0.5,
@@ -310,6 +311,7 @@ class ICM_PPO(RLAlgorithm):
         self.gae_lambda = gae_lambda
         self.action_std_init = action_std_init
         self.clip_coef = clip_coef
+        self.vf_clip_param = clip_coef if vf_clip_param is None else vf_clip_param
         self.ent_coef = ent_coef
         self.icm_lr = icm_lr
         self.icm_beta = icm_beta
@@ -1347,6 +1349,32 @@ class ICM_PPO(RLAlgorithm):
                         for key, val in mb_initial_hidden_states_dict.items()
                     }
 
+
+                for i in range(sequences_per_minibatch):
+                    augmented_rewards, _, _ = self.get_intrinsic_reward(
+                        action_batch=mb_actions_seq[i],
+                        obs_batch=mb_obs_seq[i],
+                        next_obs_batch=mb_obs_seq[i],
+                        embedded_obs=mb_latent_pi[i],
+                        embedded_next_obs=mb_latent_pi[i],
+                        hidden_state_obs={k: v[:, i] for k, v in current_step_hidden_state_actor.items() if v is not None},
+                        hidden_state_next_obs=None,
+                    )
+                    mb_returns_seq[i] = (
+                        (1 - self.intrinsic_reward_weight) * mb_returns_seq[i]
+                        + augmented_rewards # + torch.cat(
+                        #     [
+                        #         augmented_rewards,
+                        #         torch.zeros(
+                        #             (1,),
+                        #             dtype=augmented_rewards.dtype,
+                        #             device=augmented_rewards.device,
+                        #         ),
+                        #     ],
+                        #     dim=-1,
+                        # )
+                    )  # augmented rewards are already weighted by intrinsic_reward_weight
+
                 with self.timing_tracker.time_context("bptt_loss_calculation_time"):
                     loss_dict = self.compute_loss(
                         mb_obs_seq,
@@ -1397,46 +1425,25 @@ class ICM_PPO(RLAlgorithm):
 
                     # Process sequence step-by-step for recurrent ICM
                     current_hidden = icm_initial_hidden_states
-                    for t in range(seq_len - 1):  # Pairs (t, t+1)
-                        obs_t = obs_seq[:, t]
-                        next_obs_t = obs_seq[:, t + 1]
-                        action_t = actions_seq[:, t]
 
-                        # Compute embeddings with current hidden
-                        phi_t, phi_next, next_hidden_obs, next_hidden_next = (
-                            self.icm.embed_obs(
-                                obs_batch=obs_t,
-                                next_obs_batch=next_obs_t,
-                                hidden_state_obs=current_hidden,
-                                hidden_state_next_obs=current_hidden,  # Start from same for next_obs; update properly if needed
-                            )
-                        )
+                    obs_t = obs_seq[:, :-1]
+                    next_obs_t = obs_seq[:, 1:]
+                    action_t = actions_seq[:, :-1]
 
-                        # Compute losses for this pair
-                        step_total, step_i, step_f, _, _ = self.icm.compute_loss(
-                            obs_batch_t=obs_t,
-                            action_batch_t=action_t,
-                            next_obs_batch_t=next_obs_t,
-                            embedded_obs=phi_t,
-                            embedded_next_obs=phi_next,
-                            hidden_state=next_hidden_obs,
-                            hidden_state_next=next_hidden_next,
-                        )
+                    # Compute losses for this pair
+                    step_total, step_i, step_f, _, _ = self.icm.compute_loss(
+                        obs_batch_t=obs_t,
+                        action_batch_t=action_t,
+                        next_obs_batch_t=next_obs_t,
+                        embedded_obs=None,
+                        embedded_next_obs=None,
+                        hidden_state=current_hidden,
+                        hidden_state_next=None, # No need to pass next_hidden as we use the hidden_state output of icm's encoder as next hidden state
+                    )
 
-                        icm_total_loss += step_total
-                        icm_i_loss += step_i
-                        icm_f_loss += step_f
-
-                        # Advance hidden state
-                        current_hidden = (
-                            next_hidden_next or next_hidden_obs
-                        )  # Use next if available
-
-                    # Average losses over sequence
-                    num_pairs = seq_len - 1
-                    icm_total_loss /= num_pairs
-                    icm_i_loss /= num_pairs
-                    icm_f_loss /= num_pairs
+                    icm_total_loss += step_total
+                    icm_i_loss += step_i
+                    icm_f_loss += step_f
 
                     # Backward and clip
                     if hasattr(self, "icm_optimizer"):
@@ -1552,7 +1559,7 @@ class ICM_PPO(RLAlgorithm):
             if old_values is not None:
                 v_loss_unclipped = (new_values - returns) ** 2
                 v_clipped = old_values + torch.clamp(
-                    new_values - old_values, -self.clip_coef, self.clip_coef
+                    new_values - old_values, -self.vf_clip_param, self.vf_clip_param
                 )
                 v_loss_clipped = (v_clipped - returns) ** 2
                 value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
@@ -1598,7 +1605,7 @@ class ICM_PPO(RLAlgorithm):
                     hidden_state=None,
                     hidden_state_next=None,
                 )
-                loss += self.icm_loss_weight * icm_total_loss
+                loss = loss * (1 - self.icm_loss_weight) + self.icm_loss_weight * icm_total_loss
 
             return {
                 "loss": loss,
@@ -1671,7 +1678,7 @@ class ICM_PPO(RLAlgorithm):
                 hidden_state=hidden_state,
                 hidden_state_next=hidden_state,  # TODO: wire real next hidden if needed
             )
-            loss += self.icm_loss_weight * icm_total_loss
+            loss = loss * (1 - self.icm_loss_weight) + self.icm_loss_weight * icm_total_loss
 
         return {
             "loss": loss,

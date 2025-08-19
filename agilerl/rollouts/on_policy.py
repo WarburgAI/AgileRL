@@ -165,8 +165,10 @@ class ICMHook(RolloutHook):
             )
 
         # Combine extrinsic and intrinsic rewards
-        # ICM already applies intrinsic_reward_weight internally; just add it.
-        combined_reward = reward + intrinsic_reward.detach().cpu().numpy()
+        combined_reward = (
+            (1 - agent.intrinsic_reward_weight) * reward
+            + intrinsic_reward.detach().cpu().numpy()
+        )
 
         return combined_reward
 

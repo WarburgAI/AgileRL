@@ -563,6 +563,16 @@ class ICM(EvolvableModule):
                 )
             phi_obs = torch.as_tensor(embedded_obs).to(self.device)
             phi_next_obs = torch.as_tensor(embedded_next_obs).to(self.device)
+            hidden_state_t = (
+                {k: torch.as_tensor(v).to(self.device) for k, v in hidden_state_obs.items()}
+                if hidden_state_obs is not None
+                else None
+            )
+            next_hidden_state_t = (
+                {k: torch.as_tensor(v).to(self.device) for k, v in hidden_state_next_obs.items()}
+                if hidden_state_next_obs is not None
+                else None
+            )
         else:
             if obs_batch is None or next_obs_batch is None:
                 raise ValueError(
@@ -581,7 +591,7 @@ class ICM(EvolvableModule):
             )
             phi_next_obs, next_hidden_state_t = self.encoder(
                 next_obs_batch_t,
-                hidden_state_next_obs if self.is_recurrent else None,
+                hidden_state_t if self.is_recurrent else None,
             )
 
         return (
