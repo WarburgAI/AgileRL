@@ -42,7 +42,7 @@ class RolloutHook(ABC):
         return action_result
 
     def process_reward(
-        self, agent, reward, obs, next_obs, action, step_data: Dict[str, Any]
+        self, agent, reward, *args, step_data: Dict[str, Any]
     ) -> Any:
         """Process and potentially modify the reward."""
         return reward
@@ -79,6 +79,7 @@ class RolloutHook(ABC):
         """Add data to the rollout buffer."""
         # Standard buffer addition
         reward_np = np.atleast_1d(buffer_data["reward"])
+        print(f"reward_np: {reward_np}")
         done_np = np.atleast_1d(buffer_data["done"])
         value_np = np.atleast_1d(buffer_data["value"])
         log_prob_np = np.atleast_1d(buffer_data["log_prob"])
@@ -140,6 +141,11 @@ class ICMHook(RolloutHook):
     def process_reward(
         self, agent, reward, obs, next_obs, action, step_data: Dict[str, Any]
     ) -> Any:
+        if agent.pbim:
+            if step_data.get("done", None) is None:
+                raise ValueError("Done is required for PBIM")
+            done = step_data["done"]
+
         # Update encoder states for ICM
         encoder_output = step_data.get("encoder_output")
         if (
@@ -149,19 +155,35 @@ class ICMHook(RolloutHook):
             step_data["encoder_last_output"] = encoder_output
         else:
             step_data["last_obs_for_icm"] = obs
+            
+        
+            
+        kwargs = {
+            "action": action,
+            "obs": step_data.get("last_obs_for_icm"),
+            "next_obs": next_obs,
+            "embedded_obs": step_data.get("encoder_last_output"),
+            "embedded_next_obs": (
+                agent.last_step_encoder_output
+                if (
+                    hasattr(agent, "last_step_encoder_output")
+                )
+                else step_data.get("encoder_last_output")
+            ),
+            "hidden_state_obs": step_data.get("current_hidden_state_for_buffer"),
+            "hidden_state_next_obs": (
+                agent.hidden_state if hasattr(agent, "hidden_state") else None
+            ),
+        }
+
+        if done is not None:
+            kwargs["done"] = done
+        return kwargs
 
         # Calculate intrinsic reward with timing
         with agent.timing_tracker.time_context("intrinsic_reward_calculation"):
             intrinsic_reward, _, _ = agent.get_intrinsic_reward(
-                action_batch=action,
-                obs_batch=step_data.get("last_obs_for_icm"),
-                next_obs_batch=next_obs,
-                embedded_obs=step_data.get("encoder_last_output"),
-                embedded_next_obs=encoder_output,
-                hidden_state_obs=step_data.get("current_hidden_state_for_buffer"),
-                hidden_state_next_obs=(
-                    agent.hidden_state if hasattr(agent, "hidden_state") else None
-                ),
+                **kwargs
             )
 
         # Combine extrinsic and intrinsic rewards
@@ -169,6 +191,8 @@ class ICMHook(RolloutHook):
             (1 - agent.intrinsic_reward_weight) * reward
             + intrinsic_reward.detach().cpu().numpy()
         )
+        
+        agent.last_step_encoder_output = encoder_output
 
         return combined_reward
 
@@ -531,14 +555,6 @@ def _collect_rollouts(
 
             next_obs, reward, term, trunc, next_info = env.step(clipped_action)
 
-            # Process reward through hooks
-            processed_reward = primary_hook.process_reward(
-                agent, reward, obs, next_obs, action, step_data
-            )
-
-            # Detect time-limit truncation from info (Gymnasium/TimeLimit)
-            timeout_flags = _extract_timeouts(next_info, agent.num_envs)
-
             # Check if termination condition is met
             if isinstance(term, (list, np.ndarray)):
                 is_terminal = (
@@ -548,6 +564,16 @@ def _collect_rollouts(
                 )
             else:
                 is_terminal = term or trunc
+
+            step_data["done"] = is_terminal
+
+            # Process reward through hooks
+            processed_reward = primary_hook.process_reward(
+                agent, reward, obs, next_obs, action, step_data
+            )
+
+            # Detect time-limit truncation from info (Gymnasium/TimeLimit)
+            timeout_flags = _extract_timeouts(next_info, agent.num_envs)
 
             # Prepare buffer data through primary hook
             buffer_data = primary_hook.prepare_buffer_data(

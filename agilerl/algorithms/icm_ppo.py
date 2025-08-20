@@ -1350,30 +1350,30 @@ class ICM_PPO(RLAlgorithm):
                     }
 
 
-                for i in range(sequences_per_minibatch):
-                    augmented_rewards, _, _ = self.get_intrinsic_reward(
-                        action_batch=mb_actions_seq[i],
-                        obs_batch=mb_obs_seq[i],
-                        next_obs_batch=mb_obs_seq[i],
-                        embedded_obs=mb_latent_pi[i],
-                        embedded_next_obs=mb_latent_pi[i],
-                        hidden_state_obs={k: v[:, i] for k, v in current_step_hidden_state_actor.items() if v is not None},
-                        hidden_state_next_obs=None,
-                    )
-                    mb_returns_seq[i] = (
-                        (1 - self.intrinsic_reward_weight) * mb_returns_seq[i]
-                        + augmented_rewards # + torch.cat(
-                        #     [
-                        #         augmented_rewards,
-                        #         torch.zeros(
-                        #             (1,),
-                        #             dtype=augmented_rewards.dtype,
-                        #             device=augmented_rewards.device,
-                        #         ),
-                        #     ],
-                        #     dim=-1,
-                        # )
-                    )  # augmented rewards are already weighted by intrinsic_reward_weight
+                # for i in range(sequences_per_minibatch):
+                #     augmented_rewards, _, _ = self.get_intrinsic_reward(
+                #         action_batch=mb_actions_seq[i],
+                #         obs_batch=mb_obs_seq[i],
+                #         next_obs_batch=mb_obs_seq[i],
+                #         embedded_obs=mb_latent_pi[i],
+                #         embedded_next_obs=mb_latent_pi[i],
+                #         hidden_state_obs={k: v[:, i] for k, v in current_step_hidden_state_actor.items() if v is not None},
+                #         hidden_state_next_obs=None,
+                #     )
+                #     mb_returns_seq[i] = (
+                #         (1 - self.intrinsic_reward_weight) * mb_returns_seq[i]
+                #         + augmented_rewards # + torch.cat(
+                #         #     [
+                #         #         augmented_rewards,
+                #         #         torch.zeros(
+                #         #             (1,),
+                #         #             dtype=augmented_rewards.dtype,
+                #         #             device=augmented_rewards.device,
+                #         #         ),
+                #         #     ],
+                #         #     dim=-1,
+                #         # )
+                #     )  # augmented rewards are already weighted by intrinsic_reward_weight
 
                 with self.timing_tracker.time_context("bptt_loss_calculation_time"):
                     loss_dict = self.compute_loss(
