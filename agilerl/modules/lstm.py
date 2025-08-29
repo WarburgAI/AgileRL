@@ -307,6 +307,25 @@ class EvolvableLSTM(EvolvableModule):
 
         return {"numb_new_nodes": numb_new_nodes}
 
+    # ------------------------------------------------------------------
+    # Hidden-state helpers
+    # ------------------------------------------------------------------
+
+    def init_hidden(self, batch_size: int = 1, device: Optional[str] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Utility to create zero-initialized hidden and cell states.
+
+        This mirrors the shape convention used throughout the class
+        (num_layers, batch_size, hidden_state_size).
+        """
+        device = device or self.device
+        h0 = torch.zeros(
+            self.num_layers, batch_size, self.hidden_state_size, device=device
+        )
+        c0 = torch.zeros(
+            self.num_layers, batch_size, self.hidden_state_size, device=device
+        )
+        return (h0, c0)
+
     def recreate_network(self) -> None:
         """Recreates the LSTM network with current parameters."""
         model = self.create_lstm()

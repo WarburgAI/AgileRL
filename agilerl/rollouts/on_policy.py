@@ -160,6 +160,12 @@ class ICMHook(RolloutHook):
             
         kwargs = {
             "action": action,
+            "dones": done,
+        } if done is not None else {
+            "action": action,
+        }
+        
+        kwargs.update({
             "obs": step_data.get("last_obs_for_icm"),
             "next_obs": next_obs,
             "embedded_obs": step_data.get("encoder_last_output"),
@@ -174,16 +180,12 @@ class ICMHook(RolloutHook):
             "hidden_state_next_obs": (
                 agent.hidden_state if hasattr(agent, "hidden_state") else None
             ),
-        }
-
-        if done is not None:
-            kwargs["done"] = done
-        return kwargs
+        })
 
         # Calculate intrinsic reward with timing
         with agent.timing_tracker.time_context("intrinsic_reward_calculation"):
             intrinsic_reward, _, _ = agent.get_intrinsic_reward(
-                **kwargs
+                *kwargs.values()
             )
 
         # Combine extrinsic and intrinsic rewards

@@ -212,8 +212,15 @@ class ICMFeatureEncoder(EvolvableModule):
         obs: torch.Tensor,
         hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+        # Handle MLP input: if sequence (batch, seq_len, features) flatten batch and seq dims
         if self.arch == "mlp":
-            obs = obs.reshape(obs.size(0), -1)
+            if obs.dim() == 3:  # (batch, seq_len, features)
+                batch_size, seq_len, feat_dim = obs.shape
+                obs = obs.reshape(batch_size * seq_len, feat_dim)
+                sequence_processed = True
+            else:
+                sequence_processed = False
+                obs = obs.reshape(obs.size(0), -1)
         elif self.arch == "cnn":
             # Expect BCHW for EvolvableCNN unless it internally normalizes HWC
             if obs.dim() == 4:
@@ -233,6 +240,10 @@ class ICMFeatureEncoder(EvolvableModule):
                     )
 
         features = self.base_encoder(obs)
+
+        # If we flattened sequence dimension for MLP, reshape features back to (batch, seq_len, feat)
+        if self.arch == "mlp" and 'sequence_processed' in locals() and sequence_processed:
+            features = features.reshape(batch_size, seq_len, -1)
         next_hidden_state = None
 
         if self.is_recurrent and self.lstm is not None:
@@ -242,9 +253,12 @@ class ICMFeatureEncoder(EvolvableModule):
                 h_init, c_init = self.lstm.init_hidden(batch_size)
                 hidden_state = (h_init.to(self.device), c_init.to(self.device))
 
-            features = features.unsqueeze(1)
-            features, next_hidden_state = self.lstm(features, hidden_state)
-            features = features.squeeze(1)
+            if features.dim() == 2:  # (batch, feat) => make (batch, 1, feat)
+                features = features.unsqueeze(1)
+                features, next_hidden_state = self.lstm(features, hidden_state)
+                features = features.squeeze(1)
+            else:  # already (batch, seq_len, feat)
+                features, next_hidden_state = self.lstm(features, hidden_state)
 
         return features, next_hidden_state
 
@@ -300,7 +314,8 @@ class ICMInverseModel(EvolvableMLP):
         input_dim = 2 * feature_dim
         action_dim = get_action_dim(action_space)
 
-        # Store action space for loss computation
+        # Store feature_dim and action space for loss computation and cloning
+        self.feature_dim = feature_dim
         self.action_space = action_space
         self.action_sizes = get_action_sizes(action_space)
         self.is_continuous = is_continuous_action_space(action_space)
@@ -328,11 +343,84 @@ class ICMInverseModel(EvolvableMLP):
             device=device,
         )
 
+        # Explicitly delegate protocol attributes to satisfy runtime protocol checker
+        # These properties ensure isinstance(obj, EvolvableModule) returns True
+        
+    @property
+    def layer_mutation_methods(self):
+        return super().layer_mutation_methods
+        
+    @property
+    def node_mutation_methods(self):
+        return super().node_mutation_methods
+        
+    @property
+    def mutation_methods(self):
+        return super().mutation_methods
+        
+    @property
+    def last_mutation_attr(self):
+        return super().last_mutation_attr
+        
+    @property
+    def last_mutation(self):
+        return super().last_mutation
+        
+    @property
+    def rng(self):
+        return super().rng
+    
+    @property
+    def activation(self):
+        return super().activation
+    
+    def change_activation(self, activation: str, output: bool) -> None:
+        return super().change_activation(activation, output)
+    
+    def disable_mutations(self) -> None:
+        return super().disable_mutations()
+    
+    def get_mutation_methods(self):
+        return super().get_mutation_methods()
+    
+    def get_mutation_probs(self, new_layer_prob: float):
+        return super().get_mutation_probs(new_layer_prob)
+    
+    def sample_mutation_method(self, new_layer_prob: float, rng):
+        return super().sample_mutation_method(new_layer_prob, rng)
+
+    def clone(self):
+        # Create a new instance using our init_dict instead of relying on parent clone
+        import copy
+        return self.__class__(**copy.deepcopy(self.init_dict))
+    
+    @property
+    def init_dict(self):
+        # Override to provide the correct initialization dict for ICMInverseModel
+        return {
+            'feature_dim': self.num_inputs // 2,  # ICMInverseModel input is 2 * feature_dim
+            'action_space': self.action_space,
+            'net_config': None,  # Avoid circular dependency with net_config
+            'device': self.device
+        }
+
     def forward(
         self, phi_state: torch.Tensor, phi_next_state: torch.Tensor
     ) -> torch.Tensor:
-        x = torch.cat([phi_state, phi_next_state], dim=1)
-        return super().forward(x)
+        x = torch.cat([phi_state, phi_next_state], dim=-1)
+        
+        # Handle sequence inputs
+        is_sequence = x.dim() == 3
+        if is_sequence:
+            batch_size, seq_len, features = x.shape
+            x = x.reshape(batch_size * seq_len, features)
+
+        output = super().forward(x)
+
+        if is_sequence:
+            output = output.reshape(batch_size, seq_len, -1)
+
+        return output
 
 
 class ICMForwardModel(EvolvableMLP):
@@ -344,6 +432,10 @@ class ICMForwardModel(EvolvableMLP):
         device: Union[torch.device, str] = "cpu",
     ):
         input_dim = feature_dim + get_action_dim(action_space)
+        
+        # Store action_space and feature_dim for init_dict and cloning
+        self.action_space = action_space
+        self.feature_dim = feature_dim
 
         default_hidden = [feature_dim, feature_dim] if feature_dim > 0 else [256, 256]
         resolved_config = get_evolvable_mlp_config(
@@ -361,12 +453,85 @@ class ICMForwardModel(EvolvableMLP):
             layer_norm=resolved_config["layer_norm"],
             device=device,
         )
+        
+        # Explicitly delegate protocol attributes to satisfy runtime protocol checker
+        # These properties ensure isinstance(obj, EvolvableModule) returns True
+        
+    @property
+    def layer_mutation_methods(self):
+        return super().layer_mutation_methods
+        
+    @property
+    def node_mutation_methods(self):
+        return super().node_mutation_methods
+        
+    @property
+    def mutation_methods(self):
+        return super().mutation_methods
+        
+    @property
+    def last_mutation_attr(self):
+        return super().last_mutation_attr
+        
+    @property
+    def last_mutation(self):
+        return super().last_mutation
+        
+    @property
+    def rng(self):
+        return super().rng
+    
+    @property
+    def activation(self):
+        return super().activation
+    
+    def change_activation(self, activation: str, output: bool) -> None:
+        return super().change_activation(activation, output)
+    
+    def disable_mutations(self) -> None:
+        return super().disable_mutations()
+    
+    def get_mutation_methods(self):
+        return super().get_mutation_methods()
+    
+    def get_mutation_probs(self, new_layer_prob: float):
+        return super().get_mutation_probs(new_layer_prob)
+    
+    def sample_mutation_method(self, new_layer_prob: float, rng):
+        return super().sample_mutation_method(new_layer_prob, rng)
+
+    def clone(self):
+        # Create a new instance using our init_dict instead of relying on parent clone
+        import copy
+        return self.__class__(**copy.deepcopy(self.init_dict))
+    
+    @property
+    def init_dict(self):
+        # Override to provide the correct initialization dict for ICMForwardModel
+        return {
+            'feature_dim': self.num_outputs,  # output is the feature_dim
+            'action_space': self.action_space,
+            'net_config': None,  # Avoid circular dependency with net_config
+            'device': self.device
+        }
 
     def forward(
         self, phi_state: torch.Tensor, action_input: torch.Tensor
     ) -> torch.Tensor:
-        x = torch.cat([phi_state, action_input], dim=1)
-        return super().forward(x)
+        x = torch.cat([phi_state, action_input], dim=-1)
+        
+        # Handle sequence inputs
+        is_sequence = x.dim() == 3
+        if is_sequence:
+            batch_size, seq_len, features = x.shape
+            x = x.reshape(batch_size * seq_len, features)
+
+        output = super().forward(x)
+
+        if is_sequence:
+            output = output.reshape(batch_size, seq_len, -1)
+
+        return output
 
 
 # Helper functions for action space handling
@@ -418,7 +583,6 @@ class ICM(EvolvableModule):
         accelerator: Optional[Any] = None,
     ):
         super().__init__(device=device)
-
         if use_internal_encoder and encoder_net_config is None:
             raise ValueError(
                 "encoder_net_config must be provided if use_internal_encoder is True."
@@ -624,6 +788,11 @@ class ICM(EvolvableModule):
                 hidden_state_obs,
                 hidden_state_next_obs,
             )
+            
+            if phi_obs.dim() == 3:
+                batch_size, seq_len, _ = phi_obs.shape
+                phi_obs = phi_obs.reshape(batch_size * seq_len)
+                phi_next_obs = phi_next_obs.reshape(batch_size * seq_len)
 
             phi_obs = phi_obs / (phi_obs.norm(p=2, dim=-1, keepdim=True) + 1e-8)
             phi_next_obs = phi_next_obs / (
@@ -786,9 +955,17 @@ class ICM(EvolvableModule):
             targets = action_input
             if isinstance(self.action_space, spaces.Discrete):
                 # Convert one-hot targets back to class indices for CrossEntropyLoss
-                targets_indices = torch.argmax(targets, dim=1)
+                targets_indices = torch.argmax(targets, dim=-1)
+                pred_action_output = pred_action_output.reshape(-1, pred_action_output.shape[-1])
+                targets_indices = targets_indices.reshape(-1)
                 loss_I = self.ce_loss_fn(pred_action_output, targets_indices)
             elif isinstance(self.action_space, spaces.MultiDiscrete):
+                # If inputs are sequences, flatten them first
+                if pred_action_output.dim() == 3:
+                    batch_size, seq_len, _ = pred_action_output.shape
+                    pred_action_output = pred_action_output.reshape(batch_size * seq_len, -1)
+                    targets = targets.reshape(batch_size * seq_len, -1)
+                
                 # For MultiDiscrete, compute loss for each action dimension
                 losses_I = []
                 start_idx = 0
@@ -796,7 +973,7 @@ class ICM(EvolvableModule):
                     end_idx = start_idx + action_size
                     logits_i = pred_action_output[:, start_idx:end_idx]
                     # Convert one-hot targets back to class indices for CrossEntropyLoss
-                    targets_i = torch.argmax(targets[:, start_idx:end_idx], dim=1)
+                    targets_i = torch.argmax(targets[:, start_idx:end_idx], dim=-1)
                     loss_i = self.ce_loss_fn(logits_i, targets_i)
                     losses_I.append(loss_i)
                     start_idx = end_idx
@@ -809,6 +986,12 @@ class ICM(EvolvableModule):
         # === Forward Model Loss (L_F) ===
         # L_F trains the forward model and the encoder (via phi_next_obs as target).
         # phi_obs is detached as input to the forward model, as per the paper.
+        if phi_obs.dim() == 3:
+            batch_size, seq_len, _ = phi_obs.shape
+            phi_obs = phi_obs.reshape(batch_size * seq_len, -1)
+            phi_next_obs = phi_next_obs.reshape(batch_size * seq_len, -1)
+            targets = targets.reshape(batch_size * seq_len, -1)
+        
         pred_phi_next_obs = self.forward_model(phi_obs.detach(), targets)
         mse_per_feature_lf = self.mse_loss_fn(pred_phi_next_obs, phi_next_obs)
         loss_F_per_sample = 0.5 * mse_per_feature_lf.sum(dim=1)
@@ -954,12 +1137,12 @@ class ICM(EvolvableModule):
         if isinstance(action_space, spaces.Discrete):
             return F.one_hot(actions.long(), num_classes=action_space.n).float()
         elif isinstance(action_space, spaces.MultiDiscrete):
-            # actions shape: (batch_size, num_action_dims)
+            # actions shape: (batch_size, num_action_dims) or (batch_size, seq_len, num_action_dims)
             one_hots = []
             for i, n_actions in enumerate(action_space.nvec):
-                one_hot = F.one_hot(actions[:, i].long(), num_classes=n_actions).float()
+                one_hot = F.one_hot(actions[..., i].long(), num_classes=n_actions).float()
                 one_hots.append(one_hot)
-            return torch.cat(one_hots, dim=1)
+            return torch.cat(one_hots, dim=-1)
         elif isinstance(action_space, spaces.Box):
             # For continuous actions, just return the actions as float tensors
             # Optionally normalize to [0, 1] range

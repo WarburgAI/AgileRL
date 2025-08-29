@@ -450,17 +450,20 @@ class ICM_PPO(RLAlgorithm):
             networks_to_optimize = [self.actor, self.critic]
 
             # Create a separate optimizer for ICM's models
+            # Expose submodules as top-level attributes for optimizer and registry
+            self.icm_encoder = self.icm.encoder
+            self.icm_inverse_model = self.icm.inverse_model
+            self.icm_forward_model = self.icm.forward_model
 
-            icm_nets_to_optimize = self.icm.params_to_optimize
-            icm_names_to_optimize = [
-                "icm_encoder",
-                "icm_inverse_model",
-                "icm_forward_model",
+            icm_nets_to_optimize = [
+                self.icm_encoder,
+                self.icm_inverse_model,
+                self.icm_forward_model,
             ]
 
             self.icm_optimizer = OptimizerWrapper(
                 optimizer_cls=optim.Adam,
-                network_names=icm_names_to_optimize,
+                network_names=["icm_encoder", "icm_inverse_model", "icm_forward_model"],
                 networks=icm_nets_to_optimize,
                 lr=self.icm_lr,
                 lr_name="icm_lr",
@@ -487,6 +490,18 @@ class ICM_PPO(RLAlgorithm):
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         self.register_network_group(NetworkGroup(eval_network=self.critic))
         self.register_network_group(NetworkGroup(eval_network=self.icm))
+
+        if not self.use_shared_encoder_for_icm:
+            # If using a separate encoder, ICM sub-modules are optimized independently
+            # and must be registered for cloning and mutation.
+            if self.icm_encoder:
+                self.register_network_group(NetworkGroup(eval_network=self.icm_encoder))
+            self.register_network_group(
+                NetworkGroup(eval_network=self.icm_inverse_model)
+            )
+            self.register_network_group(
+                NetworkGroup(eval_network=self.icm_forward_model)
+            )
 
         self.hidden_state = None
         self._last_obs = None

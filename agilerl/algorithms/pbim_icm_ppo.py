@@ -17,7 +17,7 @@ from gymnasium import spaces
 from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.algorithms.icm_ppo import ICM_PPO
 from agilerl.components.icm import ICM
-from agilerl.typing import BPTTSequenceType
+from agilerl.typing import ArrayOrTensor, BPTTSequenceType
 
 
 class RunningMeanStd:
@@ -137,7 +137,24 @@ class PBIM_ICM(ICM):
         pred_phi_next_state = self.forward_model(phi_state, action_input)
 
         # Calculate inverse loss
-        inverse_loss = mse_loss(pred_action, action_input)
+        if self.is_continuous_action:
+            inverse_loss = mse_loss(pred_action, action_input)
+        else:
+            if isinstance(self.action_space, spaces.Discrete):
+                inverse_loss = self.ce_loss_fn(
+                    pred_action, torch.argmax(action_input, dim=-1)
+                )
+            elif isinstance(self.action_space, spaces.MultiDiscrete):
+                losses_I = []
+                start_idx = 0
+                for i, action_size in enumerate(self.inverse_model.action_sizes):
+                    end_idx = start_idx + action_size
+                    logits_i = pred_action[:, start_idx:end_idx]
+                    targets_i = torch.argmax(action_input[:, start_idx:end_idx], dim=-1)
+                    loss_i = self.ce_loss_fn(logits_i, targets_i)
+                    losses_I.append(loss_i)
+                    start_idx = end_idx
+                inverse_loss = torch.stack(losses_I).mean()
 
         # Calculate forward loss
         forward_loss = mse_loss(pred_phi_next_state, phi_next_state)
@@ -470,21 +487,22 @@ class PBIM_ICM_PPO(ICM_PPO):
         )
 
         # The potential Phi(s,a) is derived from the predicted next state embedding
-        potential = pred_phi_next_state.mean(dim=-1, keepdim=True)
+        potential = pred_phi_next_state.mean(dim=-1)
         # The next potential Phi(s') is derived from the actual next state embedding
-        next_potential = phi_next_state.mean(dim=-1, keepdim=True)
+        next_potential = phi_next_state.mean(dim=-1)
 
         return potential, next_potential
     
     def get_intrinsic_reward(
         self,
         action_batch: Any,
+        dones: Optional[torch.Tensor],
         obs_batch: Optional[Any] = None,
         next_obs_batch: Optional[Any] = None,
         embedded_obs: Optional[torch.Tensor] = None,
         embedded_next_obs: Optional[torch.Tensor] = None,
-        hidden_state_obs: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        hidden_state_next_obs: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        hidden_state_obs: Optional[Dict[str, ArrayOrTensor]] = None,
+        hidden_state_next_obs: Optional[Dict[str, ArrayOrTensor]] = None,
     ) -> Tuple[
         torch.Tensor,
         Optional[Tuple[torch.Tensor, torch.Tensor]],
@@ -497,6 +515,44 @@ class PBIM_ICM_PPO(ICM_PPO):
         :param action: The action taken at time t
         :type action: ArrayOrTensor
         """
+        action_batch = torch.as_tensor(action_batch, device=self.device)
+        dones = torch.as_tensor(dones, dtype=torch.bool, device=self.device)
+        last_dones = (
+            torch.as_tensor(self._last_done, dtype=torch.bool, device=self.device)
+            if self._last_done is not None
+            else torch.ones_like(dones, dtype=torch.bool, device=self.device)
+        )
+        obs_batch = (
+            torch.as_tensor(obs_batch, device=self.device)
+            if obs_batch is not None
+            else None
+        )
+        next_obs_batch = (
+            torch.as_tensor(next_obs_batch, device=self.device)
+            if next_obs_batch is not None
+            else None
+        )
+        embedded_obs = (
+            torch.as_tensor(embedded_obs, device=self.device)
+            if embedded_obs is not None
+            else None
+        )
+        embedded_next_obs = (
+            torch.as_tensor(embedded_next_obs, device=self.device)
+            if embedded_next_obs is not None
+            else None
+        )
+        hidden_state_obs = (
+            {k : torch.as_tensor(v, device=self.device) for k, v in hidden_state_obs.items()}
+            if hidden_state_obs is not None
+            else None
+        )
+        hidden_state_next_obs = (
+            {k : torch.as_tensor(v, device=self.device) for k, v in hidden_state_next_obs.items()}
+            if hidden_state_next_obs is not None
+            else None
+        )
+        
         with torch.no_grad():
             potential, next_potential = self.get_potentials(
                 action_batch=action_batch,
@@ -509,8 +565,9 @@ class PBIM_ICM_PPO(ICM_PPO):
                 hidden_state_next_obs=hidden_state_next_obs,
             )
             
+            # Zero out potential for terminal states, as per PBRS for episodic tasks
             next_potential = next_potential.masked_fill(dones, 0)
-            potential = potential.masked_fill(dones, 0)
+            potential = potential.masked_fill(last_dones, 0)
 
             # Compute potential-based shaping reward F(s, s') = gamma * Phi(s') - Phi(s)
             next_potential.mul_(self.gamma)
