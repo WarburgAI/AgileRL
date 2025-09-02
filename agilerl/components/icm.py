@@ -815,18 +815,6 @@ class ICM(EvolvableModule):
             returned_hidden_next_obs = next_hidden_state if self.is_recurrent else None
             return intrinsic_reward, returned_hidden_obs, returned_hidden_next_obs
 
-    # def _update_intrinsic_stats(self, r_i_raw):
-    #     # r_i_raw: (B,)
-    #     with torch.no_grad():
-    #         mean = r_i_raw.mean()
-    #         var = r_i_raw.var(unbiased=False) + 1e-8
-    #         self.ri_mean.mul_(self.ri_momentum).add_((1 - self.ri_momentum) * mean)
-    #         self.ri_var.mul_(self.ri_momentum).add_((1 - self.ri_momentum) * var)
-
-    # def standardize_intrinsic(self, r_i_raw):
-    #     r = (r_i_raw - self.ri_mean) / (self.ri_var.sqrt() + 1e-8)
-    #     return torch.clamp(r, max=3.0)
-
     def update(
         self,
         obs_batch: Any,

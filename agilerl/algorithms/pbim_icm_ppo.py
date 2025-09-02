@@ -273,174 +273,8 @@ class PBIM_ICM_PPO(ICM_PPO):
 
         if self.pbim:
             self.reward_normalizer = RunningMeanStd(device=self.device)
-
-    # def _learn_from_rollout_buffer_flat(
-    #     self, buffer_td_external: Optional[TensorDict] = None
-    # ) -> Dict[str, float]:
-    #     """
-    #     Learns from the rollout buffer using PBIM for non-recurrent policies.
-    #     """
-    #     if not self.pbim:
-    #         return super()._learn_from_rollout_buffer_flat(buffer_td_external)
-
-    #     if buffer_td_external:
-    #         buffer_td = buffer_td_external
-    #     else:
-    #         buffer_td = self.rollout_buffer.get_tensor_batch(device=self.device)
-    #         buffer_td = buffer_td.view(-1)
-
-    #     if self.use_shared_encoder_for_icm:
-    #         # Build (t, t+1) pairs along time, flatten over B*(T-1)
-    #         obs_t = buffer_td["observations"][:-1]
-    #         obs_tp = buffer_td["next_observations"][1:]
-    #         act_t = buffer_td["actions"][:-1]
-    #         action_input = buffer_td["actions"][:-1]
-    #         hidden_state_obs = buffer_td["hidden_states"][:-1]
-    #         hidden_state_next_obs = buffer_td["hidden_states"][1:]
-    #         emb_t = buffer_td["encoder_out"][:-1]
-    #         emb_tp = buffer_td["encoder_out"][1:]
-    #     else:
-    #         obs_t = buffer_td["observations"]
-    #         obs_tp = buffer_td["next_observations"]
-    #         act_t = buffer_td["actions"]
-    #         action_input = buffer_td["actions"]
-    #         hidden_state_obs = buffer_td["icm_hidden_states"]
-    #         hidden_state_next_obs = buffer_td["icm_next_hidden_states"]
-    #         emb_t = buffer_td["encoder_out"]
-    #         emb_tp = buffer_td["encoder_out"]
-
-
-    #     with torch.no_grad():
-    #         potential, next_potential = self.get_potentials(
-    #             action_batch=act_t,
-    #             obs_batch=obs_t,
-    #             next_obs_batch=obs_tp,
-    #             embedded_obs=emb_t,
-    #             embedded_next_obs=emb_tp,
-    #             action_input=None,
-    #             hidden_state_obs=hidden_state_obs,
-    #             hidden_state_next_obs=hidden_state_next_obs,
-    #         )
-
-            
-    #         next_potential = torch.concatenate([next_potential, torch.zeros((1, 1), dtype=next_potential.dtype, device=self.device)], dim=0)
-    #         potential = torch.concatenate([potential, torch.zeros((1, 1), dtype=potential.dtype, device=self.device)], dim=0)
-            
-
-    #         # Zero out potential for terminal states, as per PBRS for episodic tasks
-    #         dones = buffer_td["dones"].reshape(-1, 1)
-            
-    #         next_potential = next_potential.masked_fill(dones, 0)
-    #         potential = potential.masked_fill(dones, 0)
-
-    #         # Compute potential-based shaping reward F(s, s') = gamma * Phi(s') - Phi(s)
-    #         next_potential.mul_(self.gamma)
-    #         torch.add(next_potential, potential, alpha=-1.0, out=next_potential)  # next_potential - potential
-    #         # next_potential should now be called pbim_rewards, but we're doing it in-place to avoid temporaries
-
-    #         # Normalize the potential-based rewards (avoid temporaries)
-    #         self.reward_normalizer.update(next_potential)
-    #         denom = torch.sqrt(self.reward_normalizer.var + 1e-8)
-    #         torch.div(next_potential, denom, out=next_potential)
-    #         # next_potential is now normalized pbim_rewards
-
-    #         # out = torch.zeros_like(normalized_pbim_rewards)
-    #         # out[:, 1:] = normalized_pbim_rewards
-    #         # normalized_pbim_rewards = out
-
-    #         # Combine with extrinsic rewards (in-place on a clone to reduce memory)
-    #         rewards = buffer_td["rewards"].unsqueeze(-1)
-    #         combined_rewards = rewards.clone()
-    #         combined_rewards.mul_(1 - self.intrinsic_reward_weight)
-            
-    #         combined_rewards.add_(next_potential, alpha=self.intrinsic_reward_weight)
-    #         buffer_td["rewards"] = combined_rewards.squeeze(-1).to(buffer_td["observations"].device)
-
-    #     # Continue with standard PPO learning on the modified rewards
-    #     return super()._learn_from_rollout_buffer_flat(buffer_td_external=buffer_td)
-
-    # def _learn_from_rollout_buffer_bptt(self) -> Dict[str, float]:
-    #     """
-    #     Learns from the rollout buffer using PBIM for recurrent policies (BPTT).
-    #     """
-    #     if not self.pbim:
-    #         return super()._learn_from_rollout_buffer_bptt()
-
-    #     buffer_td = self.rollout_buffer.get_tensor_batch(device=self.device)
-    #     buffer_td = buffer_td.view(-1)
-
-    #     # Reshape for sequence-based processing
-    #     if self.use_shared_encoder_for_icm:
-    #         # Build (t, t+1) pairs along time, flatten over B*(T-1)
-    #         obs_t = buffer_td["observations"][:-1]
-    #         obs_tp = buffer_td["next_observations"][1:]
-    #         act_t = buffer_td["actions"][:-1]
-    #         action_input = buffer_td["actions"][:-1]
-    #         hidden_state_obs = buffer_td["hidden_states"][:-1]
-    #         hidden_state_next_obs = buffer_td["hidden_states"][1:]
-
-    #         emb_t = buffer_td["encoder_out"][:-1]
-    #         emb_tp = buffer_td["encoder_out"][1:]
-    #     else:
-    #         obs_t = buffer_td["observations"]
-    #         obs_tp = buffer_td["next_observations"]
-    #         act_t = buffer_td["actions"]
-    #         emb_t = buffer_td["encoder_out"]
-    #         emb_tp = buffer_td["encoder_out"]
-    #         action_input = buffer_td["actions"]
-    #         hidden_state_obs = buffer_td["icm_hidden_states"]
-    #         hidden_state_next_obs = buffer_td["icm_next_hidden_states"]
-            
-    #     num_sequences = obs_t.shape[0]
-
-    #     with torch.no_grad():
-    #         potential, next_potential = self.get_potentials(
-    #             action_batch=act_t,
-    #             obs_batch=obs_t,
-    #             next_obs_batch=obs_tp,
-    #             embedded_obs=emb_t,
-    #             embedded_next_obs=emb_tp,
-    #             action_input=None,
-    #             hidden_state_obs=hidden_state_obs,
-    #             hidden_state_next_obs=hidden_state_next_obs,
-    #         )
-            
-    #         next_potential = torch.concatenate([next_potential, torch.zeros((1, 1), dtype=next_potential.dtype, device=self.device)], dim=0)
-    #         potential = torch.concatenate([potential, torch.zeros((1, 1), dtype=potential.dtype, device=self.device)], dim=0)
-            
-
-    #         # Zero out potential for terminal states
-    #         dones = buffer_td["dones"].reshape(-1, 1)
-    #         next_potential = next_potential.masked_fill(dones, 0)
-    #         potential = potential.masked_fill(dones, 0)
-            
-
-    #         # Compute potential-based shaping reward F(s, s') = gamma * Phi(s') - Phi(s)
-    #         next_potential.mul_(self.gamma)
-    #         torch.add(next_potential, potential, alpha=-1.0, out=next_potential)  # next_potential - potential
-    #         # next_potential should now be called pbim_rewards, but we're doing it in-place to avoid temporaries
-            
-
-    #         # Normalize the potential-based rewards (avoid temporaries)
-    #         self.reward_normalizer.update(next_potential)
-    #         denom = torch.sqrt(self.reward_normalizer.var + 1e-8)
-    #         torch.div(next_potential, denom, out=next_potential)
-    #         # next_potential is now normalized pbim_rewards
-
-    #         # out = torch.zeros_like(rewards)
-    #         # out[:, 1:] = normalized_pbim_rewards
-    #         # normalized_pbim_rewards = out
-
-    #         # Combine with extrinsic rewards (scale and add in-place to reduce memory)
-    #         rewards = buffer_td["rewards"].unsqueeze(-1)
-    #         combined_rewards = rewards.clone()
-    #         combined_rewards.mul_(1 - self.intrinsic_reward_weight)
-            
-    #         combined_rewards.add_(next_potential, alpha=self.intrinsic_reward_weight)
-    #         buffer_td["rewards"] = combined_rewards.squeeze(-1).to(buffer_td["observations"].device)
-
-    #     # Let the parent class handle the rest of the BPTT update
-    #     return super()._learn_from_rollout_buffer_bptt()
+            self.last_potential = torch.zeros(1, device=self.device)
+            self.first_potential = False
 
     def get_potentials(
         self,
@@ -554,24 +388,50 @@ class PBIM_ICM_PPO(ICM_PPO):
         )
         
         with torch.no_grad():
-            potential, next_potential = self.get_potentials(
+            instrinsic_reward, hidden_state, next_hidden_state = super().get_intrinsic_reward(
                 action_batch=action_batch,
                 obs_batch=obs_batch,
                 next_obs_batch=next_obs_batch,
                 embedded_obs=embedded_obs,
                 embedded_next_obs=embedded_next_obs,
-                action_input=None,
                 hidden_state_obs=hidden_state_obs,
                 hidden_state_next_obs=hidden_state_next_obs,
             )
             
+            if not self.first_potential:
+                embedded_start_obs, hidden_start_state = self.icm.encoder(
+                    torch.zeros_like(obs_batch, device=self.device, dtype=obs_batch.dtype),
+                    {k: torch.zeros_like(v, device=self.device, dtype=v.dtype) for k, v in hidden_state.items()}
+                    if self.icm.is_recurrent else None
+                )
+
+                last_potential, _, _ = super().get_intrinsic_reward(
+                    action_batch=action_batch,
+                    obs_batch=torch.zeros_like(obs_batch, device=self.device, dtype=obs_batch.dtype),
+                    next_obs_batch=obs_batch,
+                    embedded_obs=embedded_start_obs,
+                    embedded_next_obs=embedded_obs,
+                    hidden_state_obs=hidden_start_state,
+                    hidden_state_next_obs=hidden_state,
+                )
+                torch.div(last_potential, self.icm.intrinsic_reward_weight, out=last_potential) # rescale for stats calculation
+                last_potential = last_potential.masked_fill(last_dones, 0) # mask out the last potential for the first step explicitly for clarity (of course it doesn't matter for the first step but it's good to be explicit)
+                last_potential = last_potential.mul_(self.gamma) - 0 # explicitly set last_potential to 0 for the first step for clarity
+                self.reward_normalizer.update(last_potential)
+                denom = torch.sqrt(self.reward_normalizer.var + 1e-8)
+                torch.div(last_potential, denom, out=last_potential)
+                last_potential = last_potential.mul_(self.icm.intrinsic_reward_weight) # rescale for stats calculation
+                
+                self.first_potential = True
+            else:
+                last_potential = self.last_potential
+                
             # Zero out potential for terminal states, as per PBRS for episodic tasks
-            next_potential = next_potential.masked_fill(dones, 0)
-            potential = potential.masked_fill(last_dones, 0)
+            next_potential = instrinsic_reward.masked_fill(dones, 0)
 
             # Compute potential-based shaping reward F(s, s') = gamma * Phi(s') - Phi(s)
             next_potential.mul_(self.gamma)
-            torch.add(next_potential, potential, alpha=-1.0, out=next_potential)  # next_potential - potential
+            torch.add(next_potential, last_potential, alpha=-1.0, out=next_potential)  # next_potential - potential
             # next_potential should now be called pbim_rewards, but we're doing it in-place to avoid temporaries
     
             # Normalize the potential-based rewards (avoid temporaries)
@@ -580,6 +440,7 @@ class PBIM_ICM_PPO(ICM_PPO):
             torch.div(next_potential, denom, out=next_potential)
             # next_potential is now normalized pbim_rewards
             
+            self.last_potential = next_potential
             return self.icm.intrinsic_reward_weight * next_potential, None, None
             
             
