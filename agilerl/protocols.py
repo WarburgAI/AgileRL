@@ -263,7 +263,12 @@ class EvolvableAlgorithm(Protocol):
     def unwrap_models(self) -> None: ...
     def wrap_models(self) -> None: ...
     def load(
-        cls: Type[SelfEvolvableAlgorithm], path: str
+        cls: Type[SelfEvolvableAlgorithm],
+        path: str,
+        device: str,
+        accelerator: Optional[Accelerator],
+        ignore_attributes: List[str],
+        override_attributes: Dict[str, Any],
     ) -> SelfEvolvableAlgorithm: ...
     def load_checkpoint(
         self, path: str, device: str, accelerator: Optional[Accelerator]

@@ -229,17 +229,15 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         assert isinstance(index, int), "Agent index must be an integer."
         assert isinstance(device, (str, torch.device)), "Device must be a string."
         assert isinstance(name, (type(None), str)), "Name must be a string."
-        assert isinstance(accelerator, (type(None), Accelerator)), (
-            "Accelerator must be an instance of Accelerator."
-        )
+        assert isinstance(
+            accelerator, (type(None), Accelerator)
+        ), "Accelerator must be an instance of Accelerator."
         if torch_compiler:
             assert torch_compiler in [
                 "default",
                 "reduce-overhead",
                 "max-autotune",
-            ], (
-                "Choose between torch compiler modes: default, reduce-overhead, max-autotune or None"
-            )
+            ], "Choose between torch compiler modes: default, reduce-overhead, max-autotune or None"
 
         self.accelerator = accelerator
         self.device = device if self.accelerator is None else self.accelerator.device
@@ -973,6 +971,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         path: str,
         device: DeviceType = "cpu",
         accelerator: Optional[Accelerator] = None,
+        ignore_attributes: List[str] = [],
+        override_attributes: Dict[str, Any] = {},
     ) -> SelfEvolvableAlgorithm:
         """Loads an algorithm from a checkpoint.
 
@@ -982,13 +982,19 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :type device: str, optional
         :param accelerator: Accelerator object for distributed computing, defaults to None
         :type accelerator: Optional[Accelerator], optional
+        :param ignore_attributes: Attributes to ignore when loading the checkpoint, defaults to []
+        :type ignore_attributes: List[str], optional
+        :param override_attributes: Attributes to override when loading the checkpoint, defaults to {}
+        :type override_attributes: Dict[str, Any], optional
 
         :return: An instance of the algorithm
         :rtype: RLAlgorithm
         """
+        print(f"DEBUG: Starting load from {path} to device {device}")
         checkpoint: Dict[str, Any] = torch.load(
             path, map_location=device, pickle_module=dill, weights_only=False
         )
+        print(f"DEBUG: Checkpoint loaded, keys: {list(checkpoint.keys())}")
 
         # Reconstruct evolvable modules in algorithm
         network_info: Optional[Dict[str, Dict[str, Any]]] = checkpoint.get(
@@ -1003,8 +1009,10 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             )
 
         network_names = network_info["network_names"]
+        print(f"DEBUG: Network names: {network_names}")
         loaded_modules: Dict[str, EvolvableAttributeType] = {}
         for name in network_names:
+            print(f"DEBUG: Loading network {name}")
             net_dict = {
                 k: v for k, v in network_info["modules"].items() if k.startswith(name)
             }
@@ -1027,11 +1035,15 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             ] = net_dict[f"{name}_cls"]
             if isinstance(module_cls, dict):
                 for agent_id, mod_cls in module_cls.items():
+                    print(
+                        f"DEBUG: Creating module {name}[{agent_id}] on device {device}"
+                    )
                     d = init_dict[agent_id]
                     d["device"] = device
                     mod: EvolvableModule = mod_cls(**d)
                     loaded_modules[name][agent_id] = mod
             else:
+                print(f"DEBUG: Creating module {name} on device {device}")
                 init_dict["device"] = device
 
                 if (
@@ -1043,6 +1055,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 module = module_cls(**init_dict)
                 loaded_modules[name] = module
 
+        print(f"DEBUG: All modules loaded, creating algorithm instance")
         # Reconstruct the algorithm
         constructor_params = inspect.signature(cls.__init__).parameters.keys()
         checkpoint["accelerator"] = accelerator
@@ -1056,12 +1069,15 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         # Set loaded modules
         for name, module in loaded_modules.items():
+            print(f"DEBUG: Setting module {name} on algorithm")
             setattr(self, name, module)
 
         # Apply mutation hooks
+        print(f"DEBUG: Applying mutation hooks")
         self.mutation_hook()
 
         # Load state dictionaries
+        print(f"DEBUG: Loading state dictionaries")
         for name in network_names:
             net_dict = {
                 k: v for k, v in network_info["modules"].items() if k.startswith(name)
@@ -1070,17 +1086,21 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             state_dict = net_dict[f"{name}_state_dict"]
             if isinstance(loaded_module, ModuleDict):
                 for agent_id, agent_module in loaded_module.items():
+                    print(f"DEBUG: Loading state dict for {name}[{agent_id}]")
                     agent_state_dict = state_dict[agent_id]
                     if agent_state_dict:
                         agent_module.load_state_dict(agent_state_dict)
 
             elif state_dict:
+                print(f"DEBUG: Loading state dict for {name}")
                 loaded_module.load_state_dict(state_dict)
 
         # Reconstruct optimizers in algorithm
         optimizer_names = network_info["optimizer_names"]
+        print(f"DEBUG: Optimizer names: {optimizer_names}")
         loaded_optimizers = {}
         for name in optimizer_names:
+            print(f"DEBUG: Loading optimizer {name}")
             opt_dict = {
                 k: v
                 for k, v in network_info["optimizers"].items()
@@ -1110,6 +1130,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             loaded_optimizers[name] = optimizer
 
         # Assign loaded modules and optimizers to the algorithm
+        print(f"DEBUG: Assigning loaded modules and optimizers")
         for name, module in loaded_modules.items():
             setattr(self, name, module)
 
@@ -1117,7 +1138,11 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             setattr(self, name, optimizer)
 
         # Assign other attributes to the algorithm
+        print(f"DEBUG: Assigning other attributes")
         for attribute in EvolvableAlgorithm.inspect_attributes(self).keys():
+            if attribute in ignore_attributes:
+                print(f"Ignoring attribute {attribute} when loading checkpoint.")
+                continue
             if attribute not in checkpoint:
                 warnings.warn(
                     f"Attribute {attribute} not found in checkpoint. Skipping."
@@ -1126,21 +1151,33 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
             setattr(self, attribute, checkpoint.get(attribute))
 
+        for attribute, value in override_attributes.items():
+            print(f"Overriding attribute {attribute} with value {value}.")
+            setattr(self, attribute, value)
+
         # Wrap models / compile if necessary
+        print(f"DEBUG: Wrapping models or compiling")
         if accelerator is not None:
+            print(f"DEBUG: Wrapping models with accelerator")
             self.wrap_models()
         elif self.torch_compiler:
+            print(f"DEBUG: Compiling with torch compiler")
             torch.set_float32_matmul_precision("high")
             self.recompile()
 
         # Check for agent wrapper
+        print(f"DEBUG: Checking for agent wrapper")
         wrapper_cls = checkpoint.get("wrapper_cls")
         if wrapper_cls is not None:
+            print(f"DEBUG: Creating agent wrapper")
             init_dict = checkpoint.get("wrapper_init_dict")
             wrapper_attributes = checkpoint.get("wrapper_attrs")
             self = wrapper_cls(self, **init_dict)
             for attr in wrapper_attributes:
                 setattr(self, attr, wrapper_attributes[attr])
+
+        print(f"DEBUG: Load complete")
+        return self
 
         return self
 
@@ -1180,12 +1217,12 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
     ) -> None:
         super().__init__(index, hp_config, device, accelerator, torch_compiler, name)
 
-        assert isinstance(observation_space, spaces.Space), (
-            "Observation space must be an instance of gymnasium.spaces.Space."
-        )
-        assert isinstance(action_space, spaces.Space), (
-            "Action space must be an instance of gymnasium.spaces.Space."
-        )
+        assert isinstance(
+            observation_space, spaces.Space
+        ), "Observation space must be an instance of gymnasium.spaces.Space."
+        assert isinstance(
+            action_space, spaces.Space
+        ), "Action space must be an instance of gymnasium.spaces.Space."
 
         self.observation_space = observation_space
         self.action_space = action_space
@@ -1266,18 +1303,18 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         )
 
         if isinstance(observation_spaces, (list, tuple)):
-            assert isinstance(agent_ids, (tuple, list)), (
-                "Agent IDs must be specified if observation spaces are passed as a list."
-            )
-            assert len(agent_ids) == len(observation_spaces), (
-                "Number of agent IDs must match number of observation spaces."
-            )
+            assert isinstance(
+                agent_ids, (tuple, list)
+            ), "Agent IDs must be specified if observation spaces are passed as a list."
+            assert len(agent_ids) == len(
+                observation_spaces
+            ), "Number of agent IDs must match number of observation spaces."
             assert all(
                 isinstance(_space, spaces.Space) for _space in observation_spaces
             ), "Observation spaces must be instances of gymnasium.spaces.Space."
-            assert all(isinstance(_space, spaces.Space) for _space in action_spaces), (
-                "Action spaces must be instances of gymnasium.spaces.Space."
-            )
+            assert all(
+                isinstance(_space, spaces.Space) for _space in action_spaces
+            ), "Action spaces must be instances of gymnasium.spaces.Space."
             self.possible_observation_spaces = spaces.Dict(
                 {
                     agent_id: space
@@ -1817,12 +1854,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         name: Optional[str] = None,
     ) -> None:
         super().__init__(index, hp_config, device, accelerator, None, name)
-        assert isinstance(observation_space, spaces.Space), (
-            "Observation space must be an instance of gymnasium.spaces.Space."
-        )
-        assert isinstance(action_space, spaces.Space), (
-            "Action space must be an instance of gymnasium.spaces.Space."
-        )
+        assert isinstance(
+            observation_space, spaces.Space
+        ), "Observation space must be an instance of gymnasium.spaces.Space."
+        assert isinstance(
+            action_space, spaces.Space
+        ), "Action space must be an instance of gymnasium.spaces.Space."
 
         self.observation_space = observation_space
         self.action_space = action_space
@@ -1960,9 +1997,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
         if self.accelerator is not None:
             os.makedirs(path, exist_ok=True)
-            assert self.actor is not None, (
-                "Actor is not defined, please check that the actor is defined."
-            )
+            assert (
+                self.actor is not None
+            ), "Actor is not defined, please check that the actor is defined."
             self.actor.save_checkpoint(path, tag=tag)
             self.actor.set_adapter("actor")
         else:
@@ -2009,9 +2046,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """Wrap the models in the accelerator, DeepSpeed objects must be wrapped at the same time,
         not individually."""
         if self.accelerator is not None:
-            assert self.optimizer is not None, (
-                "Optimizer is set to None, please check that the optimizer is correctly defined."
-            )
+            assert (
+                self.optimizer is not None
+            ), "Optimizer is set to None, please check that the optimizer is correctly defined."
             is_dummy_optimizer = isinstance(self.optimizer.optimizer, DummyOptimizer)
             self.actor, optimizer, self.lr_scheduler = self.accelerator.prepare(
                 self.actor, self.optimizer.optimizer, self.lr_scheduler
@@ -2025,9 +2062,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 else type(self.actor.optimizer)
             )
         else:
-            assert self.actor is not None, (
-                "Actor is set to None, please check that the actor is defined."
-            )
+            assert (
+                self.actor is not None
+            ), "Actor is set to None, please check that the actor is defined."
             self.actor = self.actor.to(self.device)
             self.actor.gradient_checkpointing_enable()
 
