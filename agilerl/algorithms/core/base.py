@@ -990,11 +990,10 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :return: An instance of the algorithm
         :rtype: RLAlgorithm
         """
-        print(f"DEBUG: Starting load from {path} to device {device}")
+
         checkpoint: Dict[str, Any] = torch.load(
             path, map_location=device, pickle_module=dill, weights_only=False
         )
-        print(f"DEBUG: Checkpoint loaded, keys: {list(checkpoint.keys())}")
 
         # Reconstruct evolvable modules in algorithm
         network_info: Optional[Dict[str, Dict[str, Any]]] = checkpoint.get(
@@ -1009,10 +1008,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             )
 
         network_names = network_info["network_names"]
-        print(f"DEBUG: Network names: {network_names}")
         loaded_modules: Dict[str, EvolvableAttributeType] = {}
         for name in network_names:
-            print(f"DEBUG: Loading network {name}")
             net_dict = {
                 k: v for k, v in network_info["modules"].items() if k.startswith(name)
             }
@@ -1035,15 +1032,11 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             ] = net_dict[f"{name}_cls"]
             if isinstance(module_cls, dict):
                 for agent_id, mod_cls in module_cls.items():
-                    print(
-                        f"DEBUG: Creating module {name}[{agent_id}] on device {device}"
-                    )
                     d = init_dict[agent_id]
                     d["device"] = device
                     mod: EvolvableModule = mod_cls(**d)
                     loaded_modules[name][agent_id] = mod
             else:
-                print(f"DEBUG: Creating module {name} on device {device}")
                 init_dict["device"] = device
 
                 if (
@@ -1055,7 +1048,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 module = module_cls(**init_dict)
                 loaded_modules[name] = module
 
-        print(f"DEBUG: All modules loaded, creating algorithm instance")
         # Reconstruct the algorithm
         constructor_params = inspect.signature(cls.__init__).parameters.keys()
         checkpoint["accelerator"] = accelerator
@@ -1069,15 +1061,12 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         # Set loaded modules
         for name, module in loaded_modules.items():
-            print(f"DEBUG: Setting module {name} on algorithm")
             setattr(self, name, module)
 
         # Apply mutation hooks
-        print(f"DEBUG: Applying mutation hooks")
         self.mutation_hook()
 
         # Load state dictionaries
-        print(f"DEBUG: Loading state dictionaries")
         for name in network_names:
             net_dict = {
                 k: v for k, v in network_info["modules"].items() if k.startswith(name)
@@ -1086,21 +1075,17 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             state_dict = net_dict[f"{name}_state_dict"]
             if isinstance(loaded_module, ModuleDict):
                 for agent_id, agent_module in loaded_module.items():
-                    print(f"DEBUG: Loading state dict for {name}[{agent_id}]")
                     agent_state_dict = state_dict[agent_id]
                     if agent_state_dict:
                         agent_module.load_state_dict(agent_state_dict)
 
             elif state_dict:
-                print(f"DEBUG: Loading state dict for {name}")
                 loaded_module.load_state_dict(state_dict)
 
         # Reconstruct optimizers in algorithm
         optimizer_names = network_info["optimizer_names"]
-        print(f"DEBUG: Optimizer names: {optimizer_names}")
         loaded_optimizers = {}
         for name in optimizer_names:
-            print(f"DEBUG: Loading optimizer {name}")
             opt_dict = {
                 k: v
                 for k, v in network_info["optimizers"].items()
@@ -1130,7 +1115,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             loaded_optimizers[name] = optimizer
 
         # Assign loaded modules and optimizers to the algorithm
-        print(f"DEBUG: Assigning loaded modules and optimizers")
         for name, module in loaded_modules.items():
             setattr(self, name, module)
 
@@ -1138,10 +1122,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             setattr(self, name, optimizer)
 
         # Assign other attributes to the algorithm
-        print(f"DEBUG: Assigning other attributes")
         for attribute in EvolvableAlgorithm.inspect_attributes(self).keys():
             if attribute in ignore_attributes:
-                print(f"Ignoring attribute {attribute} when loading checkpoint.")
                 continue
             if attribute not in checkpoint:
                 warnings.warn(
@@ -1152,32 +1134,23 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             setattr(self, attribute, checkpoint.get(attribute))
 
         for attribute, value in override_attributes.items():
-            print(f"Overriding attribute {attribute} with value {value}.")
             setattr(self, attribute, value)
 
         # Wrap models / compile if necessary
-        print(f"DEBUG: Wrapping models or compiling")
         if accelerator is not None:
-            print(f"DEBUG: Wrapping models with accelerator")
             self.wrap_models()
         elif self.torch_compiler:
-            print(f"DEBUG: Compiling with torch compiler")
             torch.set_float32_matmul_precision("high")
             self.recompile()
 
         # Check for agent wrapper
-        print(f"DEBUG: Checking for agent wrapper")
         wrapper_cls = checkpoint.get("wrapper_cls")
         if wrapper_cls is not None:
-            print(f"DEBUG: Creating agent wrapper")
             init_dict = checkpoint.get("wrapper_init_dict")
             wrapper_attributes = checkpoint.get("wrapper_attrs")
             self = wrapper_cls(self, **init_dict)
             for attr in wrapper_attributes:
                 setattr(self, attr, wrapper_attributes[attr])
-
-        print(f"DEBUG: Load complete")
-        return self
 
         return self
 
