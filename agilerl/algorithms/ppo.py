@@ -1,10 +1,11 @@
 import copy
+import gc
+import math
 import warnings
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import numpy as np
 import torch
-import gc
 import torch.optim as optim
 from gymnasium import spaces
 from tensordict import TensorDict
@@ -24,6 +25,7 @@ from agilerl.utils.algo_utils import (
     share_encoder_parameters,
 )
 from agilerl.utils.metrics import MetricsTracker, TimingTracker
+from agilerl.wrappers.utils import RunningMeanStd
 
 
 class PPO(RLAlgorithm):
@@ -67,6 +69,8 @@ class PPO(RLAlgorithm):
     :type target_kl: float, optional
     :param normalize_images: Flag to normalize images, defaults to True
     :type normalize_images: bool, optional
+    :param normalize_rewards: Flag to normalize scalar rewards using a running mean/std, defaults to True
+    :type normalize_rewards: bool, optional
     :param update_epochs: Number of policy update epochs, defaults to 4
     :type update_epochs: int, optional
     :param actor_network: Custom actor network, defaults to None
@@ -113,6 +117,7 @@ class PPO(RLAlgorithm):
         max_grad_norm: float = 0.5,
         target_kl: Optional[float] = None,
         normalize_images: bool = True,
+        normalize_rewards: bool = True,
         update_epochs: int = 4,
         actor_network: Optional[EvolvableModule] = None,
         critic_network: Optional[EvolvableModule] = None,
@@ -139,6 +144,9 @@ class PPO(RLAlgorithm):
             name="PPO",
         )
 
+        self.normalize_rewards = normalize_rewards
+        self.reward_rms = RunningMeanStd(epsilon=1e-4, device="cpu")
+
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(learn_step, int), "Learn step must be an integer."
         assert isinstance(batch_size, int), "Batch size must be an integer."
@@ -148,63 +156,63 @@ class PPO(RLAlgorithm):
         assert isinstance(gamma, (float, int, torch.Tensor)), "Gamma must be a float."
         assert isinstance(gae_lambda, (float, int)), "Lambda must be a float."
         assert gae_lambda >= 0, "Lambda must be greater than or equal to zero."
-        assert isinstance(action_std_init, (float, int)), (
-            "Action standard deviation must be a float."
-        )
-        assert action_std_init >= 0, (
-            "Action standard deviation must be greater than or equal to zero."
-        )
-        assert isinstance(clip_coef, (float, int)), (
-            "Clipping coefficient must be a float."
-        )
-        assert clip_coef >= 0, (
-            "Clipping coefficient must be greater than or equal to zero."
-        )
-        assert isinstance(ent_coef, (float, int)), (
-            "Entropy coefficient must be a float."
-        )
-        assert ent_coef >= 0, (
-            "Entropy coefficient must be greater than or equal to zero."
-        )
-        assert isinstance(vf_coef, (float, int)), (
-            "Value function coefficient must be a float."
-        )
-        assert vf_coef >= 0, (
-            "Value function coefficient must be greater than or equal to zero."
-        )
-        assert isinstance(max_grad_norm, (float, int)), (
-            "Maximum norm for gradient clipping must be a float."
-        )
-        assert max_grad_norm >= 0, (
-            "Maximum norm for gradient clipping must be greater than or equal to zero."
-        )
-        assert isinstance(target_kl, (float, int)) or target_kl is None, (
-            "Target KL divergence threshold must be a float."
-        )
+        assert isinstance(
+            action_std_init, (float, int)
+        ), "Action standard deviation must be a float."
+        assert (
+            action_std_init >= 0
+        ), "Action standard deviation must be greater than or equal to zero."
+        assert isinstance(
+            clip_coef, (float, int)
+        ), "Clipping coefficient must be a float."
+        assert (
+            clip_coef >= 0
+        ), "Clipping coefficient must be greater than or equal to zero."
+        assert isinstance(
+            ent_coef, (float, int)
+        ), "Entropy coefficient must be a float."
+        assert (
+            ent_coef >= 0
+        ), "Entropy coefficient must be greater than or equal to zero."
+        assert isinstance(
+            vf_coef, (float, int)
+        ), "Value function coefficient must be a float."
+        assert (
+            vf_coef >= 0
+        ), "Value function coefficient must be greater than or equal to zero."
+        assert isinstance(
+            max_grad_norm, (float, int)
+        ), "Maximum norm for gradient clipping must be a float."
+        assert (
+            max_grad_norm >= 0
+        ), "Maximum norm for gradient clipping must be greater than or equal to zero."
+        assert (
+            isinstance(target_kl, (float, int)) or target_kl is None
+        ), "Target KL divergence threshold must be a float."
         if target_kl is not None:
-            assert target_kl >= 0, (
-                "Target KL divergence threshold must be greater than or equal to zero."
-            )
-        assert isinstance(update_epochs, int), (
-            "Policy update epochs must be an integer."
-        )
-        assert update_epochs >= 1, (
-            "Policy update epochs must be greater than or equal to one."
-        )
-        assert isinstance(wrap, bool), (
-            "Wrap models flag must be boolean value True or False."
-        )
+            assert (
+                target_kl >= 0
+            ), "Target KL divergence threshold must be greater than or equal to zero."
+        assert isinstance(
+            update_epochs, int
+        ), "Policy update epochs must be an integer."
+        assert (
+            update_epochs >= 1
+        ), "Policy update epochs must be greater than or equal to one."
+        assert isinstance(
+            wrap, bool
+        ), "Wrap models flag must be boolean value True or False."
 
         # New parameters for using RolloutBuffer
-        assert isinstance(use_rollout_buffer, bool), (
-            "Use rollout buffer flag must be boolean value True or False."
-        )
-        assert isinstance(recurrent, bool), (
-            "Has hidden states flag must be boolean value True or False."
-        )
-        assert isinstance(bptt_sequence_type, BPTTSequenceType), (
-            "bptt_sequence_type must be a BPTTSequenceType enum value."
-        )
+        assert isinstance(
+            use_rollout_buffer, bool
+        ), "Use rollout buffer flag must be boolean value True or False."
+        assert isinstance(
+            recurrent, bool
+        ), "Has hidden states flag must be boolean value True or False."
+        assert isinstance(
+            bptt_sequence_type, BPTTSequenceType
+        ), "bptt_sequence_type must be a BPTTSequenceType enum value."
 
         if not use_rollout_buffer:
             warnings.warn(
@@ -343,6 +351,28 @@ class PPO(RLAlgorithm):
         self.total_collection_time = 0.0
         self.last_learn_time = 0.0
         self.last_collection_time = 0.0
+
+    def normalize_reward(self, reward: ArrayOrTensor) -> np.ndarray:
+        """Normalize extrinsic rewards using a running mean and variance."""
+        if not self.normalize_rewards:
+            return np.asarray(reward, dtype=np.float32)
+
+        reward_np = np.asarray(reward, dtype=np.float32)
+        if reward_np.size == 0:
+            return reward_np
+
+        flat = reward_np.reshape(-1)
+        reward_tensor = torch.from_numpy(flat).to(self.reward_rms.mean.device)
+        self.reward_rms.update(reward_tensor)
+        std = math.sqrt(self.reward_rms.var.item() + 1e-8)
+        mean = self.reward_rms.mean.item()
+
+        if std <= 0.0:
+            normalized_flat = flat - mean
+        else:
+            normalized_flat = (flat - mean) / std
+
+        return normalized_flat.reshape(reward_np.shape).astype(np.float32)
 
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critic."""

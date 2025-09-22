@@ -534,6 +534,9 @@ def _collect_rollouts(
                 agent, reward, obs, next_obs, action, step_data
             )
 
+            if hasattr(agent, "normalize_reward"):
+                processed_reward = agent.normalize_reward(processed_reward)
+
             # Detect time-limit truncation from info (Gymnasium/TimeLimit)
             timeout_flags = _extract_timeouts(next_info, agent.num_envs)
 
