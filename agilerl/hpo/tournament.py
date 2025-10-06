@@ -30,6 +30,7 @@ class TournamentSelection:
         population_size: int,
         eval_loop: int,
         agent_run_manager=None,
+        tournament_window: int = None,
     ) -> None:
         assert tournament_size > 0, "Tournament size must be greater than zero."
         assert isinstance(elitism, bool), "Elitism must be boolean value True or False."
@@ -39,6 +40,9 @@ class TournamentSelection:
         self.elitism = elitism
         self.population_size = population_size
         self.eval_loop = eval_loop
+        self.tournament_window = (
+            tournament_window if tournament_window is not None else eval_loop
+        )
         self.language_model = None
         self.agent_run_manager = agent_run_manager
 
@@ -67,7 +71,9 @@ class TournamentSelection:
         :return: Elite member of population, rank array, and max id
         :rtype: tuple[EvolvableAlgorithm, np.ndarray, int]
         """
-        last_fitness = [np.mean(indi.fitness[-self.eval_loop :]) for indi in population]
+        last_fitness = [
+            np.mean(indi.fitness[-self.tournament_window :]) for indi in population
+        ]
         rank = np.argsort(last_fitness).argsort()
         max_id = max([ind.index for ind in population])
         model = population[int(np.argsort(rank)[-1])]
@@ -118,7 +124,9 @@ class TournamentSelection:
             tournament_metrics = {
                 "tournament_rank": rank.tolist(),
                 "elite_fitness": (
-                    np.mean(elite.fitness[-self.eval_loop :]) if elite.fitness else 0
+                    np.mean(elite.fitness[-self.tournament_window :])
+                    if elite.fitness
+                    else 0
                 ),
                 "selection_pressure": self.tournament_size / len(population),
             }
