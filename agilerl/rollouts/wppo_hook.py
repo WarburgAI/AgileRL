@@ -1,6 +1,6 @@
 """WPPO-specific rollout collection hook."""
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import numpy as np
 

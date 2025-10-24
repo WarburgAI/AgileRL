@@ -1,7 +1,7 @@
 """Functions for collecting rollouts for on-policy algorithms."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -12,7 +12,8 @@ from agilerl.networks import StochasticActor
 from agilerl.typing import GymEnvType
 from agilerl.utils.metrics import TimingTracker
 
-from .wppo_hook import WPPOHook
+if TYPE_CHECKING:
+    from warburgai.agents.algorithms import WPPO
 
 SupportedOnPolicy = PPO
 
@@ -339,6 +340,7 @@ class StandardPPOHook(RolloutHook):
 
 def get_rollout_hooks(agent) -> List[RolloutHook]:
     """Get appropriate rollout hooks for the given agent."""
+    from .wppo_hook import WPPOHook
 
     hooks = []
 
