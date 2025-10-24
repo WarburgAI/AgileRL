@@ -1,7 +1,7 @@
 """Functions for collecting rollouts for on-policy algorithms."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -11,6 +11,10 @@ from agilerl.algorithms import PPO
 from agilerl.networks import StochasticActor
 from agilerl.typing import GymEnvType
 from agilerl.utils.metrics import TimingTracker
+
+if TYPE_CHECKING:
+    from warburgai.agents.algorithms import WPPO
+    from warburgai.agents.algorithms.wppo_hook import WPPOHook
 
 SupportedOnPolicy = PPO
 
@@ -337,10 +341,13 @@ class StandardPPOHook(RolloutHook):
 
 def get_rollout_hooks(agent) -> List[RolloutHook]:
     """Get appropriate rollout hooks for the given agent."""
+
     hooks = []
 
-    # Check for specific algorithm hooks first
-    if ICMHook().can_handle(agent):
+    # Check for specific algorithm hooks first (in priority order)
+    if WPPOHook().can_handle(agent):
+        hooks.append(WPPOHook())
+    elif ICMHook().can_handle(agent):
         hooks.append(ICMHook())
     elif CVARHook().can_handle(agent):
         hooks.append(CVARHook())
@@ -639,9 +646,30 @@ def _collect_rollouts(
         # Get last timeout info if available
         last_timeout = _extract_timeouts(info, agent.num_envs)
 
-        agent.rollout_buffer.compute_returns_and_advantages(
-            last_value=last_value, last_done=last_done, last_timeout=last_timeout
-        )
+        # Check if agent is WPPO and call decomposed advantage computation
+        if hasattr(agent, "_compute_decomposed_advantages"):
+            # WPPO: compute decomposed advantages with separate GAE lambdas
+            import torch as _torch
+
+            last_obs_tensor = _torch.as_tensor(
+                obs, dtype=_torch.float32, device=agent.device
+            )
+            last_done_tensor = _torch.as_tensor(
+                last_done, dtype=_torch.bool, device=agent.device
+            )
+            last_timeout_tensor = (
+                _torch.as_tensor(last_timeout, dtype=_torch.bool, device=agent.device)
+                if last_timeout is not None
+                else None
+            )
+            agent._compute_decomposed_advantages(
+                last_obs_tensor, last_done_tensor, last_timeout_tensor
+            )
+        else:
+            # Standard PPO: use standard GAE
+            agent.rollout_buffer.compute_returns_and_advantages(
+                last_value=last_value, last_done=last_done, last_timeout=last_timeout
+            )
 
     # Update timing metrics using the timing tracker
     agent.last_collection_time = agent.timing_tracker.get_average_time(

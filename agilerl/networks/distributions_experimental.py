@@ -25,7 +25,17 @@ def apply_action_mask_discrete(
     :return: Logits with mask applied.
     :rtype: torch.Tensor
     """
-    return torch.where(mask, logits, torch.full_like(logits, -1e8).to(logits.device))
+    # Optimized: Use masked_fill instead of torch.where + torch.full_like
+    # This avoids creating a full tensor of -1e8 values
+    return logits.masked_fill(~mask, -1e8)
+
+
+# Compile the mask application for faster execution
+try:
+    apply_action_mask_discrete = torch.compile(apply_action_mask_discrete)
+except Exception:
+    # If torch.compile fails (e.g., unsupported platform), keep original
+    pass
 
 
 class TorchDistribution:
@@ -58,10 +68,12 @@ class TorchDistribution:
         mu: torch.Tensor | None = None,  # for Box
         log_std: torch.Tensor | None = None,
         squash_output: bool = False,
+        use_gumbel_sampling: bool = True,  # Use faster Gumbel-Max sampling
     ):
         self.action_space = action_space
         self.logits, self.mu, self.log_std = logits, mu, log_std
         self.squash_output = squash_output and isinstance(action_space, spaces.Box)
+        self.use_gumbel_sampling = use_gumbel_sampling
         self._sampled_action: torch.Tensor | None = None
 
     # ------------------------------------------------------------------ #
@@ -69,8 +81,18 @@ class TorchDistribution:
     # ------------------------------------------------------------------ #
     def sample(self) -> torch.Tensor:
         if isinstance(self.action_space, spaces.Discrete):
-            probs = torch.softmax(self.logits, dim=-1)
-            self._sampled_action = torch.multinomial(probs, 1).squeeze(-1)
+            if self.use_gumbel_sampling:
+                # Gumbel-Max trick: faster than multinomial + softmax
+                # Mathematically equivalent to sampling from Categorical(softmax(logits))
+                # but avoids expensive softmax and multinomial operations
+                gumbel_noise = -torch.log(
+                    -torch.log(torch.rand_like(self.logits) + 1e-20) + 1e-20
+                )
+                self._sampled_action = torch.argmax(self.logits + gumbel_noise, dim=-1)
+            else:
+                # Original multinomial sampling (slower but proven)
+                probs = torch.softmax(self.logits, dim=-1)
+                self._sampled_action = torch.multinomial(probs, 1).squeeze(-1)
             return self._sampled_action
 
         if isinstance(self.action_space, spaces.Box):
@@ -87,8 +109,15 @@ class TorchDistribution:
             offset = 0
             for size in self.action_space.nvec:
                 logits_i = self.logits[:, offset : offset + size]
-                probs_i = torch.softmax(logits_i, dim=-1)
-                act_i = torch.multinomial(probs_i, 1).squeeze(-1)
+                if self.use_gumbel_sampling:
+                    # Gumbel-Max trick for each discrete component
+                    gumbel_noise = -torch.log(
+                        -torch.log(torch.rand_like(logits_i) + 1e-20) + 1e-20
+                    )
+                    act_i = torch.argmax(logits_i + gumbel_noise, dim=-1)
+                else:
+                    probs_i = torch.softmax(logits_i, dim=-1)
+                    act_i = torch.multinomial(probs_i, 1).squeeze(-1)
                 actions.append(act_i)
                 offset += size
             self._sampled_action = torch.stack(actions, dim=-1)
@@ -268,6 +297,7 @@ class EvolvableDistribution(EvolvableWrapper):
         action_std_init: float = 0.0,
         squash_output: bool = False,
         device: DeviceType = "cpu",
+        use_gumbel_sampling: bool = True,
     ):
         super().__init__(network)
 
@@ -276,8 +306,13 @@ class EvolvableDistribution(EvolvableWrapper):
         self.action_std_init = action_std_init
         self.device = device
         self.squash_output = squash_output and isinstance(action_space, spaces.Box)
+        self.use_gumbel_sampling = use_gumbel_sampling
         self.dist = None
         self.mask = None
+
+        # Cache for action mask conversion (optimization)
+        self._cached_mask = None
+        self._cached_mask_id = None
 
         # For continuous action spaces, we also learn the standard
         # deviation (log_std) of the action distribution
@@ -313,6 +348,7 @@ class EvolvableDistribution(EvolvableWrapper):
                 mu=logits,
                 log_std=log_std,
                 squash_output=self.squash_output,
+                use_gumbel_sampling=self.use_gumbel_sampling,
             )
 
         # Categorical distribution for Discrete action spaces
@@ -322,6 +358,7 @@ class EvolvableDistribution(EvolvableWrapper):
                 action_space=self.action_space,
                 logits=logits,
                 squash_output=self.squash_output,  # squash_output is ignored for discrete
+                use_gumbel_sampling=self.use_gumbel_sampling,
             )
 
         # List of categorical distributions for MultiDiscrete action spaces
@@ -331,6 +368,7 @@ class EvolvableDistribution(EvolvableWrapper):
                 action_space=self.action_space,
                 logits=logits,
                 squash_output=self.squash_output,  # squash_output is ignored for discrete
+                use_gumbel_sampling=self.use_gumbel_sampling,
             )
 
         # Bernoulli distribution for MultiBinary action spaces
@@ -340,6 +378,7 @@ class EvolvableDistribution(EvolvableWrapper):
                 action_space=self.action_space,
                 logits=logits,
                 squash_output=self.squash_output,  # squash_output is ignored for discrete
+                use_gumbel_sampling=self.use_gumbel_sampling,
             )
         else:
             raise NotImplementedError(
@@ -459,11 +498,18 @@ class EvolvableDistribution(EvolvableWrapper):
                         # If it's already a correct tensor, as_tensor below handles it.
                         pass  # Allow as_tensor to handle or raise error if still problematic
 
-            # Ensure action_mask is a tensor before applying.
-            # The view in apply_mask expects a compatible shape or will error.
-            action_mask = torch.as_tensor(
-                action_mask, device=self.device, dtype=torch.bool
-            )
+            # Optimization: Cache mask conversion to avoid repeated torch.as_tensor calls
+            # Check if this is the same mask object we already converted
+            mask_id = id(action_mask)
+            if mask_id != self._cached_mask_id:
+                # New mask, convert and cache it
+                self._cached_mask = torch.as_tensor(
+                    action_mask, device=self.device, dtype=torch.bool
+                )
+                self._cached_mask_id = mask_id
+
+            # Use cached mask
+            action_mask = self._cached_mask
 
             logits = self.apply_mask(logits, action_mask)
 
@@ -497,6 +543,7 @@ class EvolvableDistribution(EvolvableWrapper):
             action_std_init=self.action_std_init,
             squash_output=self.squash_output,
             device=self.device,
+            use_gumbel_sampling=self.use_gumbel_sampling,
         )
         clone.rng = self.rng
         return clone
