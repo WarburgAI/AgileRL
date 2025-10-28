@@ -412,256 +412,246 @@ def _collect_rollouts(
 
     # Use timing tracker context manager
     with agent.timing_tracker.time_context("rollout_collection"):
-        actor_was_training = agent.actor.training if hasattr(agent, "actor") else False
-        critic_was_training = (
-            agent.critic.training if hasattr(agent, "critic") else False
-        )
-        orig_training_flag = getattr(agent, "training", True)
+        actor_training_mode = agent.actor.training
+        critic_training_mode = agent.critic.training
+        agent_training_mode = getattr(agent, "training", True)
 
-        if hasattr(agent, "actor"):
-            agent.actor.eval()
-        if hasattr(agent, "critic"):
-            agent.critic.eval()
-        if hasattr(agent, "set_training_mode"):
-            agent.set_training_mode(False)
+        agent.actor.eval()
+        agent.critic.eval()
+        agent.set_training_mode(False)
 
-        if reset_on_collect or (
-            last_obs is None
-            or last_done is None
-            or last_scores is None
-            or last_info is None
-        ):
-            # Initial reset
-            obs, info = env.reset()
-            scores = np.zeros(agent.num_envs)
-            done = np.zeros(agent.num_envs)
-
-            # Reset agent hidden state
-            agent.hidden_state = (
-                agent.get_initial_hidden_state(agent.num_envs) if recurrent else None
-            )
-        else:
-            # Continue from last state
-            obs = last_obs
-            done = (
-                np.array(last_done, dtype=bool)
-                if last_done is not None
-                else np.zeros(agent.num_envs, dtype=bool)
-            )
-            scores = last_scores
-            info = last_info
-
-        # Initialize last_episode_starts
-        if reset_on_collect or last_done is None:
-            last_episode_starts = np.ones(agent.num_envs, dtype=bool)
-        else:
-            last_episode_starts = np.array(last_done, dtype=bool)
-
-        agent.rollout_buffer.reset()
-        current_hidden_state_for_actor = agent.hidden_state
-
-        # Initialize step data with hook-specific setup
-        step_data = {}
-        for hook in hooks:
-            hook_data = hook.on_rollout_start(agent, env, n_steps, reset_on_collect)
-            step_data.update(hook_data)
-
-        completed_episode_scores = []
-        for _ in range(n_steps):
-            current_hidden_state_for_buffer = current_hidden_state_for_actor
-            step_data["current_hidden_state_for_buffer"] = (
-                current_hidden_state_for_buffer
-            )
-
-            # Process step start
-            for hook in hooks:
-                step_data = hook.on_step_start(agent, obs, info, step_data)
-
-            # Build action mask robustly for vectorized infos
-            action_mask = None
-            if (
-                isinstance(info, (list, np.ndarray))
-                and len(info) == agent.num_envs
-                and all(isinstance(i, dict) for i in info)
+        try:
+            if reset_on_collect or (
+                last_obs is None
+                or last_done is None
+                or last_scores is None
+                or last_info is None
             ):
-                masks = [env_info.get("action_mask") for env_info in info]
-                if all(m is not None for m in masks):
-                    try:
-                        action_mask = np.stack(masks)
-                    except Exception:
+                # Initial reset
+                obs, info = env.reset()
+                scores = np.zeros(agent.num_envs)
+                done = np.zeros(agent.num_envs)
+
+                # Reset agent hidden state
+                agent.hidden_state = (
+                    agent.get_initial_hidden_state(agent.num_envs)
+                    if recurrent
+                    else None
+                )
+            else:
+                # Continue from last state
+                obs = last_obs
+                done = (
+                    np.array(last_done, dtype=bool)
+                    if last_done is not None
+                    else np.zeros(agent.num_envs, dtype=bool)
+                )
+                scores = last_scores
+                info = last_info
+
+            # Initialize last_episode_starts
+            if reset_on_collect or last_done is None:
+                last_episode_starts = np.ones(agent.num_envs, dtype=bool)
+            else:
+                last_episode_starts = np.array(last_done, dtype=bool)
+
+            agent.rollout_buffer.reset()
+            current_hidden_state_for_actor = agent.hidden_state
+
+            # Initialize step data with hook-specific setup
+            step_data = {}
+            for hook in hooks:
+                hook_data = hook.on_rollout_start(agent, env, n_steps, reset_on_collect)
+                step_data.update(hook_data)
+
+            completed_episode_scores = []
+            for _ in range(n_steps):
+                current_hidden_state_for_buffer = current_hidden_state_for_actor
+                step_data["current_hidden_state_for_buffer"] = (
+                    current_hidden_state_for_buffer
+                )
+
+                # Process step start
+                for hook in hooks:
+                    step_data = hook.on_step_start(agent, obs, info, step_data)
+
+                # Build action mask robustly for vectorized infos
+                action_mask = None
+                if (
+                    isinstance(info, (list, np.ndarray))
+                    and len(info) == agent.num_envs
+                    and all(isinstance(i, dict) for i in info)
+                ):
+                    masks = [env_info.get("action_mask") for env_info in info]
+                    if all(m is not None for m in masks):
+                        try:
+                            action_mask = np.stack(masks)
+                        except Exception:
+                            action_mask = None
+                    elif any(m is not None for m in masks):
                         action_mask = None
-                elif any(m is not None for m in masks):
-                    action_mask = None
-            elif isinstance(info, dict):
-                action_mask = info.get("action_mask", None)
+                elif isinstance(info, dict):
+                    action_mask = info.get("action_mask", None)
 
-            step_data["action_mask"] = action_mask
+                step_data["action_mask"] = action_mask
 
-            # Get action, statistics and (maybe) recurrent hidden state from agent
-            if recurrent:
-                action_result = agent.get_action(
+                # Get action, statistics and (maybe) recurrent hidden state from agent
+                if recurrent:
+                    action_result = agent.get_action(
+                        obs,
+                        action_mask=action_mask,
+                        hidden_state=current_hidden_state_for_actor,
+                    )
+                else:
+                    action_result = agent.get_action(obs, action_mask=action_mask)
+
+                # Process action result through hooks
+                processed_result = primary_hook.process_action_result(
+                    agent, action_result, recurrent
+                )
+
+                if recurrent:
+                    if len(processed_result) >= 6:
+                        (
+                            action,
+                            log_prob,
+                            _,
+                            value,
+                            next_hidden_for_actor,
+                            encoder_output,
+                        ) = processed_result[:6]
+                    else:
+                        action, log_prob, _, value, next_hidden_for_actor = (
+                            processed_result[:5]
+                        )
+                        encoder_output = None
+                    agent.hidden_state = next_hidden_for_actor
+                else:
+                    if len(processed_result) >= 6:
+                        action, log_prob, _, value, _, encoder_output = (
+                            processed_result[:6]
+                        )
+                    else:
+                        action, log_prob, _, value = processed_result[:4]
+                        encoder_output = None
+
+                step_data["encoder_output"] = encoder_output
+
+                # Clip action to action space
+                policy = getattr(agent, agent.registry.policy())
+                if isinstance(policy, StochasticActor) and isinstance(
+                    agent.action_space, spaces.Box
+                ):
+                    if policy.squash_output:
+                        clipped_action = policy.scale_action(action)
+                    else:
+                        clipped_action = np.clip(
+                            action,
+                            agent.action_space.low,
+                            agent.action_space.high,
+                        )
+                else:
+                    clipped_action = action
+
+                next_obs, reward, term, trunc, next_info = env.step(clipped_action)
+
+                # Process reward through hooks
+                processed_reward = primary_hook.process_reward(
+                    agent, reward, obs, next_obs, action, step_data
+                )
+
+                if hasattr(agent, "normalize_reward"):
+                    processed_reward = agent.normalize_reward(processed_reward)
+
+                # Detect time-limit truncation from info (Gymnasium/TimeLimit)
+                timeout_flags = _extract_timeouts(next_info, agent.num_envs)
+
+                # Check if termination condition is met
+                if isinstance(term, (list, np.ndarray)):
+                    is_terminal = (
+                        np.logical_or(term, trunc)
+                        if isinstance(trunc, (list, np.ndarray))
+                        else term
+                    )
+                else:
+                    is_terminal = term or trunc
+
+                # Add next_info to step_data for hooks that need it (e.g., WPPO)
+                step_data["next_info"] = next_info
+
+                # Prepare buffer data through primary hook
+                buffer_data = primary_hook.prepare_buffer_data(
+                    agent,
                     obs,
-                    action_mask=action_mask,
-                    hidden_state=current_hidden_state_for_actor,
+                    action,
+                    processed_reward,
+                    is_terminal,
+                    value,
+                    log_prob,
+                    next_obs,
+                    current_hidden_state_for_buffer,
+                    step_data,
+                    timeout=timeout_flags,
                 )
-            else:
-                action_result = agent.get_action(obs, action_mask=action_mask)
 
-            # Process action result through hooks
-            processed_result = primary_hook.process_action_result(
-                agent, action_result, recurrent
-            )
+                buffer_data["episode_start"] = last_episode_starts
+                # Add to buffer through primary hook
+                primary_hook.add_to_buffer(agent, buffer_data)
 
-            if recurrent:
-                if len(processed_result) >= 6:
-                    (
-                        action,
-                        log_prob,
-                        _,
-                        value,
-                        next_hidden_for_actor,
-                        encoder_output,
-                    ) = processed_result[:6]
-                else:
-                    action, log_prob, _, value, next_hidden_for_actor = (
-                        processed_result[:5]
+                scores += np.atleast_1d(processed_reward)
+                done = np.atleast_1d(is_terminal)
+                done = done.astype(bool)
+
+                # Update episode starts for next step
+                last_episode_starts = done
+
+                if recurrent and np.any(done):
+                    finished_mask = torch.as_tensor(
+                        done, dtype=torch.bool, device=agent.device
                     )
-                    encoder_output = None
-                agent.hidden_state = next_hidden_for_actor
-            else:
-                if len(processed_result) >= 6:
-                    action, log_prob, _, value, _, encoder_output = processed_result[:6]
-                else:
-                    action, log_prob, _, value = processed_result[:4]
-                    encoder_output = None
-
-            step_data["encoder_output"] = encoder_output
-
-            # Clip action to action space
-            policy = getattr(agent, agent.registry.policy())
-            if isinstance(policy, StochasticActor) and isinstance(
-                agent.action_space, spaces.Box
-            ):
-                if policy.squash_output:
-                    clipped_action = policy.scale_action(action)
-                else:
-                    clipped_action = np.clip(
-                        action,
-                        agent.action_space.low,
-                        agent.action_space.high,
+                    initial_hidden_states_for_reset = agent.get_initial_hidden_state(
+                        agent.num_envs
                     )
-            else:
-                clipped_action = action
-
-            next_obs, reward, term, trunc, next_info = env.step(clipped_action)
-
-            # Process reward through hooks
-            processed_reward = primary_hook.process_reward(
-                agent, reward, obs, next_obs, action, step_data
-            )
-
-            if hasattr(agent, "normalize_reward"):
-                processed_reward = agent.normalize_reward(processed_reward)
-
-            # Detect time-limit truncation from info (Gymnasium/TimeLimit)
-            timeout_flags = _extract_timeouts(next_info, agent.num_envs)
-
-            # Check if termination condition is met
-            if isinstance(term, (list, np.ndarray)):
-                is_terminal = (
-                    np.logical_or(term, trunc)
-                    if isinstance(trunc, (list, np.ndarray))
-                    else term
-                )
-            else:
-                is_terminal = term or trunc
-
-            # Add next_info to step_data for hooks that need it (e.g., WPPO)
-            step_data["next_info"] = next_info
-
-            # Prepare buffer data through primary hook
-            buffer_data = primary_hook.prepare_buffer_data(
-                agent,
-                obs,
-                action,
-                processed_reward,
-                is_terminal,
-                value,
-                log_prob,
-                next_obs,
-                current_hidden_state_for_buffer,
-                step_data,
-                timeout=timeout_flags,
-            )
-
-            buffer_data["episode_start"] = last_episode_starts
-            # Add to buffer through primary hook
-            primary_hook.add_to_buffer(agent, buffer_data)
-
-            scores += np.atleast_1d(processed_reward)
-            done = np.atleast_1d(is_terminal)
-            done = done.astype(bool)
-
-            # Update episode starts for next step
-            last_episode_starts = done
-
-            if recurrent and np.any(done):
-                finished_mask = torch.as_tensor(
-                    done, dtype=torch.bool, device=agent.device
-                )
-                initial_hidden_states_for_reset = agent.get_initial_hidden_state(
-                    agent.num_envs
-                )
-                if isinstance(agent.hidden_state, dict):
-                    for key in agent.hidden_state:
-                        reset_states_for_key = initial_hidden_states_for_reset[key][
-                            :, finished_mask, :
-                        ]
-                        if reset_states_for_key.shape[1] > 0:
-                            # Detach to prevent gradient accumulation across episodes
-                            agent.hidden_state[key][
+                    if isinstance(agent.hidden_state, dict):
+                        for key in agent.hidden_state:
+                            reset_states_for_key = initial_hidden_states_for_reset[key][
                                 :, finished_mask, :
-                            ] = reset_states_for_key.detach()
+                            ]
+                            if reset_states_for_key.shape[1] > 0:
+                                # Detach to prevent gradient accumulation across episodes
+                                agent.hidden_state[key][
+                                    :, finished_mask, :
+                                ] = reset_states_for_key.detach()
 
-            # Handle episode endings through hooks
+                # Handle episode endings through hooks
+                for hook in hooks:
+                    hook.on_episode_end(agent, 0, done, step_data)
+
+                if recurrent:
+                    current_hidden_state_for_actor = agent.hidden_state
+
+                obs = next_obs
+                info = next_info
+
+                for idx, env_done in enumerate(done):
+                    if env_done:
+                        completed_episode_scores.append(scores[idx])
+                        agent.scores.append(scores[idx])
+                        scores[idx] = 0
+
+            # Handle rollout end through hooks
             for hook in hooks:
-                hook.on_episode_end(agent, 0, done, step_data)
+                hook.on_rollout_end(agent, env, step_data)
 
-            if recurrent:
-                current_hidden_state_for_actor = agent.hidden_state
-
-            obs = next_obs
-            info = next_info
-
-            for idx, env_done in enumerate(done):
-                if env_done:
-                    completed_episode_scores.append(scores[idx])
-                    agent.scores.append(scores[idx])
-                    scores[idx] = 0
-
-        # Handle rollout end through hooks
-        for hook in hooks:
-            hook.on_rollout_end(agent, env, step_data)
-
-        # Restore training/eval state
-        if hasattr(agent, "set_training_mode"):
-            agent.set_training_mode(orig_training_flag)
-        if hasattr(agent, "actor"):
-            if actor_was_training:
-                agent.actor.train()
-            else:
-                agent.actor.eval()
-        if hasattr(agent, "critic"):
-            if critic_was_training:
-                agent.critic.train()
-            else:
-                agent.critic.eval()
-
-        # Store the last observation, info, done, and scores for potential continuation
-        agent._last_obs = (obs, info)
-        agent._last_done = done
-        agent._last_scores = scores
-        agent._last_info = info
+            # Store the last observation, info, done, and scores for potential continuation
+            agent._last_obs = (obs, info)
+            agent._last_done = done
+            agent._last_scores = scores
+            agent._last_info = info
+        finally:
+            agent.actor.train(actor_training_mode)
+            agent.critic.train(critic_training_mode)
+            agent.set_training_mode(agent_training_mode)
 
         # Calculate last value to compute returns and advantages properly
         with torch.no_grad():
@@ -685,8 +675,17 @@ def _collect_rollouts(
         # Check if agent is WPPO and call decomposed advantage computation
         if hasattr(agent, "_compute_decomposed_advantages"):
             # WPPO: compute decomposed advantages with separate GAE lambdas
-            # CRITICAL FIX: Pass last_value that was already computed to avoid recomputation
-            agent._compute_decomposed_advantages(last_value, last_done, last_timeout)
+            # Pass last_value that was already computed and the cached last components for unbiased bootstrap
+            last_value_components = None
+            consume_fn = getattr(agent, "_consume_cached_value_components", None)
+            if callable(consume_fn):
+                last_value_components = consume_fn()
+            agent._compute_decomposed_advantages(
+                last_value,
+                last_done,
+                last_timeout,
+                last_value_components=last_value_components,
+            )
         else:
             # Standard PPO: use standard GAE
             agent.rollout_buffer.compute_returns_and_advantages(
