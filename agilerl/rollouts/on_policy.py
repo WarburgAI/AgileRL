@@ -340,14 +340,20 @@ class StandardPPOHook(RolloutHook):
 
 def get_rollout_hooks(agent) -> List[RolloutHook]:
     """Get appropriate rollout hooks for the given agent."""
-    from .wppo_hook import WPPOHook
 
     hooks = []
 
     # Check for specific algorithm hooks first (in priority order)
-    if WPPOHook().can_handle(agent):
-        hooks.append(WPPOHook())
-    elif ICMHook().can_handle(agent):
+    # Import WPPOHook locally to avoid circular imports
+    try:
+        from warburgai.agents.algorithms.utils.wppo_hook import WPPOHook
+
+        if WPPOHook().can_handle(agent):
+            hooks.append(WPPOHook())
+    except ImportError:
+        pass  # WPPO not available
+
+    if ICMHook().can_handle(agent):
         hooks.append(ICMHook())
     elif CVARHook().can_handle(agent):
         hooks.append(CVARHook())
@@ -557,6 +563,9 @@ def _collect_rollouts(
             else:
                 is_terminal = term or trunc
 
+            # Add next_info to step_data for hooks that need it (e.g., WPPO)
+            step_data["next_info"] = next_info
+
             # Prepare buffer data through primary hook
             buffer_data = primary_hook.prepare_buffer_data(
                 agent,
@@ -649,22 +658,8 @@ def _collect_rollouts(
         # Check if agent is WPPO and call decomposed advantage computation
         if hasattr(agent, "_compute_decomposed_advantages"):
             # WPPO: compute decomposed advantages with separate GAE lambdas
-            import torch as _torch
-
-            last_obs_tensor = _torch.as_tensor(
-                obs, dtype=_torch.float32, device=agent.device
-            )
-            last_done_tensor = _torch.as_tensor(
-                last_done, dtype=_torch.bool, device=agent.device
-            )
-            last_timeout_tensor = (
-                _torch.as_tensor(last_timeout, dtype=_torch.bool, device=agent.device)
-                if last_timeout is not None
-                else None
-            )
-            agent._compute_decomposed_advantages(
-                last_obs_tensor, last_done_tensor, last_timeout_tensor
-            )
+            # CRITICAL FIX: Pass last_value that was already computed to avoid recomputation
+            agent._compute_decomposed_advantages(last_value, last_done, last_timeout)
         else:
             # Standard PPO: use standard GAE
             agent.rollout_buffer.compute_returns_and_advantages(

@@ -83,6 +83,27 @@ def get_output_size_from_space(
             key: get_output_size_from_space(subspace)
             for key, subspace in action_space.items()
         }
+    elif isinstance(action_space, spaces.Tuple):
+        # Flatten tuple action spaces by summing constituent sizes
+        sizes: List[int] = []
+        for subspace in action_space.spaces:
+            sub_size = get_output_size_from_space(subspace)
+            if isinstance(sub_size, tuple):
+                # For Box spaces that might return shapes, flatten by product
+                sizes.append(int(np.prod(sub_size)))
+            elif isinstance(sub_size, dict):
+                # For Dict (unlikely in action space), sum values
+                sizes.append(
+                    int(
+                        sum(
+                            int(v) if not isinstance(v, tuple) else int(np.prod(v))
+                            for v in sub_size.values()
+                        )
+                    )
+                )
+            else:
+                sizes.append(int(sub_size))
+        return int(sum(sizes))
     elif isinstance(action_space, spaces.MultiBinary):
         return action_space.n
     elif isinstance(action_space, spaces.Discrete):

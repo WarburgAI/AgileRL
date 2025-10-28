@@ -667,7 +667,7 @@ def create_population(
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.5),
                 target_kl=INIT_HP.get("TARGET_KL"),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 4),
-                share_encoders=INIT_HP.get("SHARE_ENCODERS", True),
+                share_encoders=False,  # WPPO requires separate encoders for decomposed critics
                 actor_network=actor_network,
                 critic_network=critic_network,
                 device=device,

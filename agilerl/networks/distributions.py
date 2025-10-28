@@ -242,6 +242,41 @@ class MultiCategoricalHandler:
         return torch.stack([dist.mode for dist in distribution], dim=1)
 
 
+class HybridHandler:
+    """Handler for hybrid distributions: (Categorical for discrete, Normal for continuous).
+
+    Expects a tuple of (Categorical, Normal) distributions.
+    The returned action is concatenated as [discrete_index, continuous...].
+    """
+
+    def sample(self, distribution: Tuple[Categorical, Normal]) -> torch.Tensor:
+        cat_dist, cont_dist = distribution
+        discrete = cat_dist.sample().unsqueeze(1).float()
+        continuous = cont_dist.sample()
+        return torch.cat([discrete, continuous], dim=1)
+
+    def log_prob(
+        self, distribution: Tuple[Categorical, Normal], action: torch.Tensor
+    ) -> torch.Tensor:
+        cat_dist, cont_dist = distribution
+        discrete = action[:, 0]
+        continuous = action[:, 1:]
+        return cat_dist.log_prob(discrete.long()) + sum_independent_tensor(
+            cont_dist.log_prob(continuous)
+        )
+
+    def entropy(self, distribution: Tuple[Categorical, Normal]) -> torch.Tensor:
+        cat_dist, cont_dist = distribution
+        return cat_dist.entropy() + sum_independent_tensor(cont_dist.entropy())
+
+    def mode(self, distribution: Tuple[Categorical, Normal]) -> torch.Tensor:
+        # Fallback: use argmax for categorical and mean for normal
+        cat_dist, cont_dist = distribution
+        discrete = cat_dist.mode.unsqueeze(1).float()
+        continuous = cont_dist.mean
+        return torch.cat([discrete, continuous], dim=1)
+
+
 class TorchDistribution:
     """Wrapper to output a distribution over an action space for an evolvable module. It provides methods
     to sample actions and compute log probabilities, relevant for many policy-gradient algorithms such as
@@ -286,6 +321,12 @@ class TorchDistribution:
         """
         if isinstance(distribution, list):
             return self._handlers[list]
+        # Hybrid: tuple of (Categorical, Normal)
+        if isinstance(distribution, tuple) and len(distribution) == 2:
+            if isinstance(distribution[0], Categorical) and isinstance(
+                distribution[1], Normal
+            ):
+                return HybridHandler()
 
         for dist_type, handler in self._handlers.items():
             if isinstance(distribution, dist_type) and dist_type is not list:
@@ -398,6 +439,17 @@ class EvolvableDistribution(EvolvableWrapper):
                 torch.ones(1, np.prod(action_space.shape), device=device)
                 * action_std_init
             )
+        elif isinstance(action_space, spaces.Tuple):
+            # Assume (Discrete(n), Box(k,)) hybrid
+            assert (
+                len(action_space.spaces) == 2
+                and isinstance(action_space.spaces[0], spaces.Discrete)
+                and isinstance(action_space.spaces[1], spaces.Box)
+            ), "Tuple action space must be (Discrete, Box)."
+            k = int(np.prod(action_space.spaces[1].shape))
+            self.log_std = torch.nn.Parameter(
+                torch.ones(1, k, device=device) * action_std_init
+            )
 
     @property
     def net_config(self) -> NetConfigType:
@@ -436,6 +488,20 @@ class EvolvableDistribution(EvolvableWrapper):
         # Bernoulli distribution for MultiBinary action spaces
         elif isinstance(self.action_space, spaces.MultiBinary):
             dist = Bernoulli(logits=logits)
+        elif isinstance(self.action_space, spaces.Tuple):
+            # Hybrid: split logits into discrete and continuous means
+            disc_space: spaces.Discrete = self.action_space.spaces[0]  # type: ignore[assignment]
+            box_space: spaces.Box = self.action_space.spaces[1]  # type: ignore[assignment]
+            n = disc_space.n
+            k = int(np.prod(box_space.shape))
+            assert logits.shape[1] == n + k, "Hybrid logits must have n+k outputs"
+            disc_logits = logits[:, :n]
+            cont_means = logits[:, n:]
+            log_std = self.log_std.expand_as(cont_means)
+            action_std = torch.exp(log_std)
+            cat = Categorical(logits=disc_logits)
+            norm = Normal(loc=cont_means, scale=action_std)
+            dist = (cat, norm)
         else:
             raise NotImplementedError(
                 f"Action space {self.action_space} not supported."
@@ -502,6 +568,17 @@ class EvolvableDistribution(EvolvableWrapper):
                 )
 
             masked_logits = torch.cat(masked_logits, dim=1)
+        elif isinstance(self.action_space, spaces.Tuple):
+            # Only mask the discrete part (first n logits)
+            disc_space: spaces.Discrete = self.action_space.spaces[0]  # type: ignore[assignment]
+            n = disc_space.n
+            disc_logits = logits[:, :n]
+            cont_logits = logits[:, n:]
+            mask = torch.as_tensor(mask, dtype=torch.bool, device=self.device)
+            if mask.ndim == 1:
+                mask = mask.unsqueeze(0).expand_as(disc_logits)
+            masked_disc = apply_action_mask_discrete(disc_logits, mask)
+            masked_logits = torch.cat([masked_disc, cont_logits], dim=1)
         else:
             raise NotImplementedError(
                 f"Action space {self.action_space} not supported."

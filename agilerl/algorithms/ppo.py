@@ -470,11 +470,15 @@ class PPO(RLAlgorithm):
                 sample=sample,
                 deterministic=deterministic,
             )
-            values = (
-                self.critic.forward_head(latent_pi).squeeze(-1)
-                if self.share_encoders
-                else self.critic(obs).squeeze(-1)
-            )
+            if self.share_encoders:
+                values = self.critic.forward_head(latent_pi).squeeze(-1)
+            else:
+                critic_output = self.critic(obs)
+                # Handle case where critic returns tuple (recurrent critic with hidden_state=None)
+                if isinstance(critic_output, tuple):
+                    values = critic_output[0].squeeze(-1)
+                else:
+                    values = critic_output.squeeze(-1)
             return action, log_prob, entropy, values, None
 
     def get_hidden_state_architecture(self) -> Dict[str, Tuple[int, ...]]:

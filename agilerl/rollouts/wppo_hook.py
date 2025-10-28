@@ -20,8 +20,15 @@ class WPPOHook(RolloutHook):
 
     def can_handle(self, agent) -> bool:
         """Check if this hook can handle the given agent."""
-        # WPPO has _compute_decomposed_advantages method
-        return hasattr(agent, "_compute_decomposed_advantages")
+        # WPPO has _compute_decomposed_advantages method AND WPPORolloutBuffer
+        # If WPPO is using standard RolloutBuffer (for testing), don't use this hook
+        from warburgai.agents.algorithms.wppo_rollout_buffer import WPPORolloutBuffer
+
+        return (
+            hasattr(agent, "_compute_decomposed_advantages")
+            and hasattr(agent, "rollout_buffer")
+            and isinstance(agent.rollout_buffer, WPPORolloutBuffer)
+        )
 
     def prepare_buffer_data(
         self,
@@ -62,6 +69,11 @@ class WPPOHook(RolloutHook):
         # Extract value components if agent computed them
         if "value_components" in step_data:
             buffer_data["value_components"] = step_data["value_components"]
+
+        # CRITICAL FIX: Include all other step_data (like action_mask) to avoid KL divergence
+        # Action masks are added to step_data and must be passed through to the buffer
+        if "action_mask" in step_data:
+            buffer_data["action_mask"] = step_data["action_mask"]
 
         return buffer_data
 
