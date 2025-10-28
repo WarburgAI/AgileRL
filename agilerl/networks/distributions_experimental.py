@@ -459,6 +459,30 @@ class EvolvableDistribution(EvolvableWrapper):
 
         return masked_logits
 
+    def build_dist_from_latent(self, latent, action_mask=None):
+        """Build a TorchDistribution from a latent representation.
+
+        :param latent: Latent space representation.
+        :type latent: torch.Tensor
+        :param action_mask: Optional mask to apply to logits before building the distribution.
+        :type action_mask: Optional[ArrayOrTensor]
+        :return: TorchDistribution built from the network outputs (logits or parameters).
+        """
+        logits = self.wrapped(latent)
+        if action_mask is not None:
+            logits = self.apply_mask(logits, action_mask)
+        return self.get_distribution(logits)
+
+    def log_prob_from_latent(self, latent, actions, action_mask=None):
+        """Compute log probability for actions given latent inputs (and optional mask)."""
+        dist = self.build_dist_from_latent(latent, action_mask)
+        return dist.log_prob(actions)
+
+    def entropy_from_latent(self, latent, action_mask=None):
+        """Compute entropy of the distribution given latent inputs (and optional mask)."""
+        dist = self.build_dist_from_latent(latent, action_mask)
+        return dist.entropy()
+
     def forward(
         self,
         latent: torch.Tensor,

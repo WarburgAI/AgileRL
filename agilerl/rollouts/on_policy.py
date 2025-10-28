@@ -412,6 +412,19 @@ def _collect_rollouts(
 
     # Use timing tracker context manager
     with agent.timing_tracker.time_context("rollout_collection"):
+        actor_was_training = agent.actor.training if hasattr(agent, "actor") else False
+        critic_was_training = (
+            agent.critic.training if hasattr(agent, "critic") else False
+        )
+        orig_training_flag = getattr(agent, "training", True)
+
+        if hasattr(agent, "actor"):
+            agent.actor.eval()
+        if hasattr(agent, "critic"):
+            agent.critic.eval()
+        if hasattr(agent, "set_training_mode"):
+            agent.set_training_mode(False)
+
         if reset_on_collect or (
             last_obs is None
             or last_done is None
@@ -629,6 +642,20 @@ def _collect_rollouts(
         # Handle rollout end through hooks
         for hook in hooks:
             hook.on_rollout_end(agent, env, step_data)
+
+        # Restore training/eval state
+        if hasattr(agent, "set_training_mode"):
+            agent.set_training_mode(orig_training_flag)
+        if hasattr(agent, "actor"):
+            if actor_was_training:
+                agent.actor.train()
+            else:
+                agent.actor.eval()
+        if hasattr(agent, "critic"):
+            if critic_was_training:
+                agent.critic.train()
+            else:
+                agent.critic.eval()
 
         # Store the last observation, info, done, and scores for potential continuation
         agent._last_obs = (obs, info)
