@@ -350,6 +350,7 @@ def create_population(
                 target_kl=INIT_HP.get("TARGET_KL"),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 4),
                 share_encoders=INIT_HP.get("SHARE_ENCODERS", True),
+                use_muon=INIT_HP.get("USE_MUON", False),
                 actor_network=actor_network,
                 critic_network=critic_network,
                 device=device,

@@ -126,6 +126,7 @@ class PPO(RLAlgorithm):
         use_rollout_buffer: bool = False,
         rollout_buffer_config: Optional[Dict[str, Any]] = {},
         recurrent: bool = False,
+        use_muon: bool = False,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
@@ -319,7 +320,7 @@ class PPO(RLAlgorithm):
             self.register_mutation_hook(self.share_encoder_parameters)
 
         self.optimizer = OptimizerWrapper(
-            optim.Adam,
+            optim.Adam if not use_muon else optim.Muon,
             networks=[self.actor, self.critic],
             lr=self.lr,
             optimizer_kwargs={"eps": optimizer_eps},
