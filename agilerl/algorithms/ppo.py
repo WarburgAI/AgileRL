@@ -111,6 +111,7 @@ class PPO(RLAlgorithm):
         action_std_init: float = 0.0,
         clip_coef: float = 0.2,
         vf_clip_param: Optional[float] = None,
+        optimizer: str = "adam",
         optimizer_eps: float = 1e-5,
         ent_coef: float = 0.01,
         vf_coef: float = 0.5,
@@ -126,7 +127,6 @@ class PPO(RLAlgorithm):
         use_rollout_buffer: bool = False,
         rollout_buffer_config: Optional[Dict[str, Any]] = {},
         recurrent: bool = False,
-        use_muon: bool = False,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
@@ -319,8 +319,19 @@ class PPO(RLAlgorithm):
             # Need to register a mutation hook that does this after every mutation
             self.register_mutation_hook(self.share_encoder_parameters)
 
+        optim_cls = (
+            optim.Adam
+            if optimizer == "adam"
+            else (
+                optim.AdamW
+                if optimizer == "adamw"
+                else optim.Muon if optimizer == "muon" else None
+            )
+        )
+        if optim_cls is None:
+            raise ValueError(f"Invalid optimizer: {optimizer}")
         self.optimizer = OptimizerWrapper(
-            optim.Adam if not use_muon else optim.Muon,
+            optim_cls,
             networks=[self.actor, self.critic],
             lr=self.lr,
             optimizer_kwargs={"eps": optimizer_eps},
