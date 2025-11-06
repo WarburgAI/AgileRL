@@ -343,20 +343,20 @@ def get_rollout_hooks(agent) -> List[RolloutHook]:
 
     hooks = []
 
-    # Check for specific algorithm hooks first (in priority order)
-    # Import WPPOHook locally to avoid circular imports
-    try:
-        from warburgai.agents.algorithms.utils.wppo_hook import WPPOHook
+    # # Check for specific algorithm hooks first (in priority order)
+    # # Import WPPOHook locally to avoid circular imports
+    # try:
+    #     from warburgai.agents.algorithms.utils.wppo_hook import WPPOHook
 
-        if WPPOHook().can_handle(agent):
-            hooks.append(WPPOHook())
-    except ImportError:
-        pass  # WPPO not available
+    #     if WPPOHook().can_handle(agent):
+    #         hooks.append(WPPOHook())
+    # except ImportError:
+    #     pass  # WPPO not available
 
-    if ICMHook().can_handle(agent):
-        hooks.append(ICMHook())
-    elif CVARHook().can_handle(agent):
-        hooks.append(CVARHook())
+    # if ICMHook().can_handle(agent):
+    #     hooks.append(ICMHook())
+    # elif CVARHook().can_handle(agent):
+    #     hooks.append(CVARHook())
 
     # Always add standard PPO hook as fallback
     hooks.append(StandardPPOHook())
@@ -619,9 +619,9 @@ def _collect_rollouts(
                             ]
                             if reset_states_for_key.shape[1] > 0:
                                 # Detach to prevent gradient accumulation across episodes
-                                agent.hidden_state[key][
-                                    :, finished_mask, :
-                                ] = reset_states_for_key.detach()
+                                agent.hidden_state[key][:, finished_mask, :] = (
+                                    reset_states_for_key.detach()
+                                )
 
                 # Handle episode endings through hooks
                 for hook in hooks:

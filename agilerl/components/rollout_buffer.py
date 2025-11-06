@@ -693,30 +693,44 @@ class RolloutBuffer:
             )
 
         # Compute valid starting indices along the time dimension for each environment
-        max_start_time_idx = (
-            buffer_size - seq_len
-        )  # This is the max start index within one env's rollout
+        max_start_time_idx = buffer_size - seq_len
 
         if max_start_time_idx < 0:  # Not enough data in buffer for even one sequence
             return []
 
         valid_coords = []
-        for env_idx in range(self.num_envs):
-            for t_idx in range(max_start_time_idx + 1):
-                if self.recurrent:
-                    # Check if the sequence [t_idx+1 : t_idx + seq_len] has any episode_start=True
-                    # If yes, it crosses a boundary, skip
-                    episode_starts_in_seq = self.buffer["episode_starts"][
-                        t_idx + 1 : t_idx + seq_len, env_idx
-                    ]
-                    if torch.any(episode_starts_in_seq):
-                        continue
-                valid_coords.append((env_idx, t_idx))
 
-        if not valid_coords:  # Should be caught by max_start_time_idx < 0 check too
-            return []
+        if self.recurrent:
+            # Vectorized boundary checking across all envs and times
+            # Shape: [buffer_size, num_envs]
+            episode_starts = self.buffer["episode_starts"][:buffer_size].to(
+                dtype=torch.int32
+            )
+            # Cumulative sum along time allows O(1) window sum queries for any [t+1 : t+seq_len)
+            cumsum = episode_starts.cumsum(dim=0)
+            # All possible start times T = max_start_time_idx + 1
+            start_idx = torch.arange(0, max_start_time_idx + 1, device=cumsum.device)
+            end_idx = start_idx + (seq_len - 1)
+            # Gather cumulative sums at window ends/starts -> shape [T, num_envs]
+            cum_end = cumsum.index_select(0, end_idx)
+            cum_start = cumsum.index_select(0, start_idx)
+            # Window [t+1 : t+seq_len) has no episode starts if sum == 0
+            window_sum = cum_end - cum_start
+            valid_mask = window_sum.eq(0)
+            # Convert mask to list of (env_idx, time_idx) pairs
+            t_idx, env_idx = torch.nonzero(valid_mask, as_tuple=True)
+            valid_coords = [
+                (int(e.item()), int(t.item())) for t, e in zip(t_idx, env_idx)
+            ]
+        else:
+            # Non-recurrent case: all coordinates are valid
+            valid_coords = [
+                (env_idx, t_idx)
+                for env_idx in range(self.num_envs)
+                for t_idx in range(max_start_time_idx + 1)
+            ]
 
-        if len(valid_coords) == 0:
+        if not valid_coords:
             warnings.warn(
                 f"No valid sequences of length {seq_len} found that do not cross episode boundaries."
             )
@@ -864,6 +878,7 @@ class RolloutBuffer:
         ],  # List of (env_idx, time_idx_in_env_rollout)
         device: Optional[str] = None,
         include_keys: Optional[List[str]] = None,
+        as_plain_dict: bool = False,
     ) -> TensorDict:
         """
         Returns a TensorDict with batched sequences for specific, pre-determined
@@ -907,11 +922,75 @@ class RolloutBuffer:
         # Each row k contains [env_idx_k, env_idx_k, ..., env_idx_k] (repeated seq_len times)
         env_indices_expanded = env_indices_for_batch.unsqueeze(1).expand(-1, seq_len)
 
-        # Perform advanced indexing on the CPU buffer.
-        # self.buffer has batch_dims (capacity, num_envs).
-        # The resulting sequences_td_cpu will have batch_dims (actual_batch_size, seq_len) and be on CPU.
-        sequences_td_cpu = self.buffer[time_indices, env_indices_expanded]
+        if as_plain_dict:
+            # Fast path: directly index required tensors per-key and return a plain dict; avoids
+            # constructing a new TensorDict via expensive __getitem__ on the whole structure.
+            result: Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]] = {}
 
+            keys_to_fetch = include_keys or [
+                "observations",
+                "actions",
+                "log_probs",
+                "advantages",
+                "returns",
+                "values",
+                "action_masks",
+            ]
+
+            for key in keys_to_fetch:
+                if key not in self.buffer.keys(include_nested=True, leaves_only=False):
+                    continue
+                value = self.buffer.get(key)
+                if isinstance(value, dict):
+                    # Dict observation space
+                    sub_dict = {}
+                    for subk, subt in value.items():
+                        sub_dict[subk] = subt[time_indices, env_indices_expanded]
+                    result[key] = sub_dict
+                elif isinstance(value, TensorDict):
+                    # Unlikely here except for nested structures; skip heavy selection
+                    # by pulling leaves directly
+                    sub_dict = {}
+                    for subk, subt in value.items():
+                        sub_dict[subk] = subt[time_indices, env_indices_expanded]
+                    result[key] = sub_dict
+                else:
+                    # Plain tensor of shape (capacity, num_envs, ...)
+                    result[key] = value[time_indices, env_indices_expanded]
+
+            # Build initial hidden states efficiently using only start indices
+            if self.recurrent and "hidden_states" in self.buffer.keys(
+                include_nested=False
+            ):
+                initial_hidden_states_for_output: Dict[str, torch.Tensor] = {}
+                start_times = time_indices[:, 0]
+                hs_td = self.buffer.get("hidden_states")
+                if isinstance(hs_td, dict):
+                    for h_key, h_tensor in hs_td.items():
+                        initial_hidden_states_for_output[h_key] = h_tensor[
+                            start_times, env_indices_for_batch
+                        ]  # (B, layers, size)
+                elif isinstance(hs_td, TensorDict):
+                    for h_key, h_tensor in hs_td.items():
+                        initial_hidden_states_for_output[h_key] = h_tensor[
+                            start_times, env_indices_for_batch
+                        ]
+                if initial_hidden_states_for_output:
+                    result["initial_hidden_states"] = initial_hidden_states_for_output
+
+            # Move tensors to output_device
+            output_device = device or self.device
+            for k, v in list(result.items()):
+                if isinstance(v, dict):
+                    for subk, subt in v.items():
+                        result[k][subk] = subt.to(output_device)
+                else:
+                    result[k] = v.to(output_device)
+
+            return result  # type: ignore[return-value]
+
+        # Slow path: advanced-index the entire TensorDict (original behavior)
+        sequences_td_cpu = self.buffer[time_indices, env_indices_expanded]
         # Optionally reduce to only needed keys for this training step
         if include_keys is not None:
             # Ensure hidden_states is available if we are recurrent and need initial states

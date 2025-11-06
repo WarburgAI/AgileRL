@@ -157,63 +157,63 @@ class PPO(RLAlgorithm):
         assert isinstance(gamma, (float, int, torch.Tensor)), "Gamma must be a float."
         assert isinstance(gae_lambda, (float, int)), "Lambda must be a float."
         assert gae_lambda >= 0, "Lambda must be greater than or equal to zero."
-        assert isinstance(
-            action_std_init, (float, int)
-        ), "Action standard deviation must be a float."
-        assert (
-            action_std_init >= 0
-        ), "Action standard deviation must be greater than or equal to zero."
-        assert isinstance(
-            clip_coef, (float, int)
-        ), "Clipping coefficient must be a float."
-        assert (
-            clip_coef >= 0
-        ), "Clipping coefficient must be greater than or equal to zero."
-        assert isinstance(
-            ent_coef, (float, int)
-        ), "Entropy coefficient must be a float."
-        assert (
-            ent_coef >= 0
-        ), "Entropy coefficient must be greater than or equal to zero."
-        assert isinstance(
-            vf_coef, (float, int)
-        ), "Value function coefficient must be a float."
-        assert (
-            vf_coef >= 0
-        ), "Value function coefficient must be greater than or equal to zero."
-        assert isinstance(
-            max_grad_norm, (float, int)
-        ), "Maximum norm for gradient clipping must be a float."
-        assert (
-            max_grad_norm >= 0
-        ), "Maximum norm for gradient clipping must be greater than or equal to zero."
-        assert (
-            isinstance(target_kl, (float, int)) or target_kl is None
-        ), "Target KL divergence threshold must be a float."
+        assert isinstance(action_std_init, (float, int)), (
+            "Action standard deviation must be a float."
+        )
+        assert action_std_init >= 0, (
+            "Action standard deviation must be greater than or equal to zero."
+        )
+        assert isinstance(clip_coef, (float, int)), (
+            "Clipping coefficient must be a float."
+        )
+        assert clip_coef >= 0, (
+            "Clipping coefficient must be greater than or equal to zero."
+        )
+        assert isinstance(ent_coef, (float, int)), (
+            "Entropy coefficient must be a float."
+        )
+        assert ent_coef >= 0, (
+            "Entropy coefficient must be greater than or equal to zero."
+        )
+        assert isinstance(vf_coef, (float, int)), (
+            "Value function coefficient must be a float."
+        )
+        assert vf_coef >= 0, (
+            "Value function coefficient must be greater than or equal to zero."
+        )
+        assert isinstance(max_grad_norm, (float, int)), (
+            "Maximum norm for gradient clipping must be a float."
+        )
+        assert max_grad_norm >= 0, (
+            "Maximum norm for gradient clipping must be greater than or equal to zero."
+        )
+        assert isinstance(target_kl, (float, int)) or target_kl is None, (
+            "Target KL divergence threshold must be a float."
+        )
         if target_kl is not None:
-            assert (
-                target_kl >= 0
-            ), "Target KL divergence threshold must be greater than or equal to zero."
-        assert isinstance(
-            update_epochs, int
-        ), "Policy update epochs must be an integer."
-        assert (
-            update_epochs >= 1
-        ), "Policy update epochs must be greater than or equal to one."
-        assert isinstance(
-            wrap, bool
-        ), "Wrap models flag must be boolean value True or False."
+            assert target_kl >= 0, (
+                "Target KL divergence threshold must be greater than or equal to zero."
+            )
+        assert isinstance(update_epochs, int), (
+            "Policy update epochs must be an integer."
+        )
+        assert update_epochs >= 1, (
+            "Policy update epochs must be greater than or equal to one."
+        )
+        assert isinstance(wrap, bool), (
+            "Wrap models flag must be boolean value True or False."
+        )
 
         # New parameters for using RolloutBuffer
-        assert isinstance(
-            use_rollout_buffer, bool
-        ), "Use rollout buffer flag must be boolean value True or False."
-        assert isinstance(
-            recurrent, bool
-        ), "Has hidden states flag must be boolean value True or False."
-        assert isinstance(
-            bptt_sequence_type, BPTTSequenceType
-        ), "bptt_sequence_type must be a BPTTSequenceType enum value."
+        assert isinstance(use_rollout_buffer, bool), (
+            "Use rollout buffer flag must be boolean value True or False."
+        )
+        assert isinstance(recurrent, bool), (
+            "Has hidden states flag must be boolean value True or False."
+        )
+        assert isinstance(bptt_sequence_type, BPTTSequenceType), (
+            "bptt_sequence_type must be a BPTTSequenceType enum value."
+        )
 
         if not use_rollout_buffer:
             warnings.warn(
@@ -325,7 +325,9 @@ class PPO(RLAlgorithm):
             else (
                 optim.AdamW
                 if optimizer == "adamw"
-                else optim.Muon if optimizer == "muon" else None
+                else optim.Muon
+                if optimizer == "muon"
+                else None
             )
         )
         if optim_cls is None:
@@ -659,7 +661,7 @@ class PPO(RLAlgorithm):
             )
 
     @staticmethod
-    def _explained_variance(y_pred: torch.Tensor, y_true: torch.Tensor) -> float:
+    def _explained_variance(y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         """Calculate explained variance.
 
         :param y_pred: Predicted values (shape: (N,))
@@ -667,9 +669,10 @@ class PPO(RLAlgorithm):
         :return: Explained variance ratio
         """
         var_y = torch.var(y_true)
-        if var_y <= 0:
-            return 0.0
-        return (1.0 - torch.var(y_true - y_pred) / var_y).item()
+        # Avoid CPU sync; return a scalar tensor on the same device
+        ev = 1.0 - torch.var(y_true - y_pred) / (var_y + 1e-8)
+        # When variance is ~0, clamp to 0 to avoid spurious values
+        return torch.clamp(ev, min=0.0, max=1.0)
 
     def compute_loss(
         self,
@@ -764,10 +767,8 @@ class PPO(RLAlgorithm):
                 policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss
             )
             with torch.no_grad():
-                approx_kl = ((ratio - 1) - log_ratio).mean().item()
-                clip_fraction = (
-                    (torch.abs(ratio - 1.0) > self.clip_coef).float().mean().item()
-                )
+                approx_kl = ((ratio - 1) - log_ratio).mean()
+                clip_fraction = (torch.abs(ratio - 1.0) > self.clip_coef).float().mean()
             return {
                 "loss": loss,
                 "policy_loss": policy_loss,
@@ -811,10 +812,8 @@ class PPO(RLAlgorithm):
         loss = policy_loss + self.vf_coef * value_loss + self.ent_coef * entropy_loss
         with torch.no_grad():
             log_ratio = new_log_prob_t - old_log_probs
-            approx_kl = ((torch.exp(log_ratio) - 1) - log_ratio).mean().item()
-            clip_fraction = (
-                (torch.abs(ratio - 1.0) > self.clip_coef).float().mean().item()
-            )
+            approx_kl = ((torch.exp(log_ratio) - 1) - log_ratio).mean()
+            clip_fraction = (torch.abs(ratio - 1.0) > self.clip_coef).float().mean()
         return {
             "loss": loss,
             "policy_loss": policy_loss,
@@ -944,6 +943,15 @@ class PPO(RLAlgorithm):
             np.random.shuffle(indices)
             num_minibatches_this_epoch = 0
 
+            # Accumulate metrics as tensors to avoid per-minibatch CPU sync
+            sum_total_loss = torch.zeros((), device=self.device)
+            sum_policy_loss = torch.zeros((), device=self.device)
+            sum_value_loss = torch.zeros((), device=self.device)
+            sum_entropy_loss = torch.zeros((), device=self.device)
+            sum_approx_kl = torch.zeros((), device=self.device)
+            sum_clip_fraction = torch.zeros((), device=self.device)
+            sum_ev = torch.zeros((), device=self.device)
+
             for start_idx in range(0, num_samples, batch_size):
                 end_idx = min(start_idx + batch_size, num_samples)
                 minibatch_indices = indices[start_idx:end_idx]
@@ -998,18 +1006,19 @@ class PPO(RLAlgorithm):
                     )
                 loss = loss_dict["loss"]
 
-                # Pre-compute metrics scalars and EV to enable earlier frees
-                policy_loss_item = loss_dict["policy_loss"].item()
-                value_loss_item = loss_dict["value_loss"].item()
-                entropy_loss_item = loss_dict["entropy_loss"].item()
-                approx_kl_value = float(loss_dict["approx_kl"])  # already scalar
-                clip_fraction_value = float(loss_dict["clip_fraction"])  # scalar
+                # Accumulate metrics (tensor scalars, detached)
+                sum_policy_loss += loss_dict["policy_loss"].detach()
+                sum_value_loss += loss_dict["value_loss"].detach()
+                sum_entropy_loss += loss_dict["entropy_loss"].detach()
+                sum_approx_kl += loss_dict["approx_kl"].detach()
+                sum_clip_fraction += loss_dict["clip_fraction"].detach()
 
                 # Compute EV using old values vs returns (no extra forward)
                 with torch.no_grad():
                     ev = self._explained_variance(
                         mb_old_values.reshape(-1), mb_returns.reshape(-1)
                     )
+                    sum_ev += ev
 
                 # Release non-required tensors before backward
                 if mb_action_masks is not None:
@@ -1022,23 +1031,16 @@ class PPO(RLAlgorithm):
                     clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
                     self.optimizer.step()
 
-                # Track metrics (use precomputed scalars)
-                self.learn_metrics.add("total_loss", loss.item())
-                self.learn_metrics.add("policy_loss", policy_loss_item)
-                self.learn_metrics.add("value_loss", value_loss_item)
-                self.learn_metrics.add("entropy_loss", entropy_loss_item)
-                self.learn_metrics.add("approx_kl", approx_kl_value)
-                self.learn_metrics.add("clip_fraction", clip_fraction_value)
-                self.learn_metrics.add("explained_variance", ev)
+                # Track only minibatch count; aggregation happens after loop
+                sum_total_loss += loss.detach()
 
                 num_minibatches_this_epoch += 1
 
                 # Check KL divergence for early stopping using current minibatch value
-                current_approx_kl = approx_kl_value
+                current_approx_kl = float(loss_dict["approx_kl"].detach().cpu())
                 should_stop = (
                     self.target_kl is not None and current_approx_kl > self.target_kl
                 )
-
                 # Clean up minibatch tensors to free memory
                 del (
                     mb_obs,
@@ -1057,6 +1059,31 @@ class PPO(RLAlgorithm):
                         f"Flat learning: KL divergence {current_approx_kl:.4f} exceeded target {self.target_kl}. Stopping update for this epoch."
                     )
                     break  # Break from minibatch loop for this epoch
+
+            # After all minibatches for this epoch, log averaged metrics once
+            denom = max(1, num_minibatches_this_epoch)
+            inv = 1.0 / denom
+            self.learn_metrics.add(
+                "total_loss", float((sum_total_loss * inv).detach().cpu())
+            )
+            self.learn_metrics.add(
+                "policy_loss", float((sum_policy_loss * inv).detach().cpu())
+            )
+            self.learn_metrics.add(
+                "value_loss", float((sum_value_loss * inv).detach().cpu())
+            )
+            self.learn_metrics.add(
+                "entropy_loss", float((sum_entropy_loss * inv).detach().cpu())
+            )
+            self.learn_metrics.add(
+                "approx_kl", float((sum_approx_kl * inv).detach().cpu())
+            )
+            self.learn_metrics.add(
+                "clip_fraction", float((sum_clip_fraction * inv).detach().cpu())
+            )
+            self.learn_metrics.add(
+                "explained_variance", float((sum_ev * inv).detach().cpu())
+            )
 
         # Free large references after training step
         del buffer_td
@@ -1142,6 +1169,14 @@ class PPO(RLAlgorithm):
         for epoch in range(self.update_epochs):
             np.random.shuffle(all_start_coords)
             num_minibatches_this_epoch = 0
+            # Accumulate metrics per epoch to reduce .item() calls
+            sum_total_loss = torch.zeros((), device=self.device)
+            sum_policy_loss = torch.zeros((), device=self.device)
+            sum_value_loss = torch.zeros((), device=self.device)
+            sum_entropy_loss = torch.zeros((), device=self.device)
+            sum_approx_kl = torch.zeros((), device=self.device)
+            sum_clip_fraction = torch.zeros((), device=self.device)
+            sum_ev = torch.zeros((), device=self.device)
 
             for i in range(0, len(all_start_coords), sequences_per_minibatch):
                 current_coords_minibatch = all_start_coords[
@@ -1168,15 +1203,12 @@ class PPO(RLAlgorithm):
                                 "values",
                                 "action_masks",
                             ],
+                            as_plain_dict=True,
                         )
                     )
 
-                if (
-                    current_minibatch_td.is_empty()
-                    or "observations"
-                    not in current_minibatch_td.keys(
-                        include_nested=True, leaves_only=True
-                    )
+                if (not isinstance(current_minibatch_td, dict)) or (
+                    "observations" not in current_minibatch_td
                 ):
                     warnings.warn("Skipping empty or invalid minibatch of sequences.")
                     continue
@@ -1195,12 +1227,12 @@ class PPO(RLAlgorithm):
                 mb_old_values_seq = current_minibatch_td["values"].to(self.device)
                 mb_action_masks_seq = (
                     current_minibatch_td.get("action_masks").to(self.device)
-                    if "action_masks" in current_minibatch_td.keys(include_nested=True)
+                    if "action_masks" in current_minibatch_td
                     else None
                 )
 
-                mb_initial_hidden_states_dict = current_minibatch_td.get_non_tensor(
-                    "initial_hidden_states", default=None
+                mb_initial_hidden_states_dict = current_minibatch_td.get(
+                    "initial_hidden_states", None
                 )
 
                 # Free the container as early as possible
@@ -1237,18 +1269,19 @@ class PPO(RLAlgorithm):
                     )
                 loss = loss_dict["loss"]
 
-                # Precompute scalar metrics to allow early frees
-                policy_loss_item = loss_dict["policy_loss"].item()
-                value_loss_item = loss_dict["value_loss"].item()
-                entropy_loss_item = loss_dict["entropy_loss"].item()
-                approx_kl_value = float(loss_dict["approx_kl"])  # scalar
-                clip_fraction_value = float(loss_dict["clip_fraction"])  # scalar
+                # Accumulate metrics (tensor scalars)
+                sum_policy_loss += loss_dict["policy_loss"].detach()
+                sum_value_loss += loss_dict["value_loss"].detach()
+                sum_entropy_loss += loss_dict["entropy_loss"].detach()
+                sum_approx_kl += loss_dict["approx_kl"].detach()
+                sum_clip_fraction += loss_dict["clip_fraction"].detach()
 
                 # EV using old values vs returns (avoid extra forward)
                 with torch.no_grad():
                     ev = self._explained_variance(
                         mb_old_values_seq.reshape(-1), mb_returns_seq.reshape(-1)
                     )
+                    sum_ev += ev
 
                 # Free masks before backward
                 if mb_action_masks_seq is not None:
@@ -1261,19 +1294,13 @@ class PPO(RLAlgorithm):
                     clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
                     self.optimizer.step()
 
-                # Track metrics (use precomputed scalars)
-                self.learn_metrics.add("total_loss", loss.item())
-                self.learn_metrics.add("policy_loss", policy_loss_item)
-                self.learn_metrics.add("value_loss", value_loss_item)
-                self.learn_metrics.add("entropy_loss", entropy_loss_item)
-                self.learn_metrics.add("approx_kl", approx_kl_value)
-                self.learn_metrics.add("clip_fraction", clip_fraction_value)
-                self.learn_metrics.add("explained_variance", ev)
+                # Track only counts; add aggregated metrics after loop
+                sum_total_loss += loss.detach()
 
                 num_minibatches_this_epoch += 1
 
                 # Check KL divergence for early stopping using current minibatch value
-                current_approx_kl = approx_kl_value
+                current_approx_kl = float(loss_dict["approx_kl"].detach().cpu())
                 should_stop = (
                     self.target_kl is not None and current_approx_kl > self.target_kl
                 )
@@ -1291,6 +1318,31 @@ class PPO(RLAlgorithm):
                         f"Minibatch: KL divergence {current_approx_kl:.4f} exceeded target {self.target_kl}. Stopping update for this epoch."
                     )
                     break  # Break from minibatch loop for this epoch
+
+            # Log averaged metrics once per epoch
+            denom = max(1, num_minibatches_this_epoch)
+            inv = 1.0 / denom
+            self.learn_metrics.add(
+                "total_loss", float((sum_total_loss * inv).detach().cpu())
+            )
+            self.learn_metrics.add(
+                "policy_loss", float((sum_policy_loss * inv).detach().cpu())
+            )
+            self.learn_metrics.add(
+                "value_loss", float((sum_value_loss * inv).detach().cpu())
+            )
+            self.learn_metrics.add(
+                "entropy_loss", float((sum_entropy_loss * inv).detach().cpu())
+            )
+            self.learn_metrics.add(
+                "approx_kl", float((sum_approx_kl * inv).detach().cpu())
+            )
+            self.learn_metrics.add(
+                "clip_fraction", float((sum_clip_fraction * inv).detach().cpu())
+            )
+            self.learn_metrics.add(
+                "explained_variance", float((sum_ev * inv).detach().cpu())
+            )
 
     def add_collection_time(self, collection_time: float) -> None:
         """Add collection time to metrics tracker.
