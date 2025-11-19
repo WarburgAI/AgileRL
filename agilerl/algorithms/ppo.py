@@ -157,63 +157,63 @@ class PPO(RLAlgorithm):
         assert isinstance(gamma, (float, int, torch.Tensor)), "Gamma must be a float."
         assert isinstance(gae_lambda, (float, int)), "Lambda must be a float."
         assert gae_lambda >= 0, "Lambda must be greater than or equal to zero."
-        assert isinstance(action_std_init, (float, int)), (
-            "Action standard deviation must be a float."
-        )
-        assert action_std_init >= 0, (
-            "Action standard deviation must be greater than or equal to zero."
-        )
-        assert isinstance(clip_coef, (float, int)), (
-            "Clipping coefficient must be a float."
-        )
-        assert clip_coef >= 0, (
-            "Clipping coefficient must be greater than or equal to zero."
-        )
-        assert isinstance(ent_coef, (float, int)), (
-            "Entropy coefficient must be a float."
-        )
-        assert ent_coef >= 0, (
-            "Entropy coefficient must be greater than or equal to zero."
-        )
-        assert isinstance(vf_coef, (float, int)), (
-            "Value function coefficient must be a float."
-        )
-        assert vf_coef >= 0, (
-            "Value function coefficient must be greater than or equal to zero."
-        )
-        assert isinstance(max_grad_norm, (float, int)), (
-            "Maximum norm for gradient clipping must be a float."
-        )
-        assert max_grad_norm >= 0, (
-            "Maximum norm for gradient clipping must be greater than or equal to zero."
-        )
-        assert isinstance(target_kl, (float, int)) or target_kl is None, (
-            "Target KL divergence threshold must be a float."
-        )
+        assert isinstance(
+            action_std_init, (float, int)
+        ), "Action standard deviation must be a float."
+        assert (
+            action_std_init >= 0
+        ), "Action standard deviation must be greater than or equal to zero."
+        assert isinstance(
+            clip_coef, (float, int)
+        ), "Clipping coefficient must be a float."
+        assert (
+            clip_coef >= 0
+        ), "Clipping coefficient must be greater than or equal to zero."
+        assert isinstance(
+            ent_coef, (float, int)
+        ), "Entropy coefficient must be a float."
+        assert (
+            ent_coef >= 0
+        ), "Entropy coefficient must be greater than or equal to zero."
+        assert isinstance(
+            vf_coef, (float, int)
+        ), "Value function coefficient must be a float."
+        assert (
+            vf_coef >= 0
+        ), "Value function coefficient must be greater than or equal to zero."
+        assert isinstance(
+            max_grad_norm, (float, int)
+        ), "Maximum norm for gradient clipping must be a float."
+        assert (
+            max_grad_norm >= 0
+        ), "Maximum norm for gradient clipping must be greater than or equal to zero."
+        assert (
+            isinstance(target_kl, (float, int)) or target_kl is None
+        ), "Target KL divergence threshold must be a float."
         if target_kl is not None:
-            assert target_kl >= 0, (
-                "Target KL divergence threshold must be greater than or equal to zero."
-            )
-        assert isinstance(update_epochs, int), (
-            "Policy update epochs must be an integer."
-        )
-        assert update_epochs >= 1, (
-            "Policy update epochs must be greater than or equal to one."
-        )
-        assert isinstance(wrap, bool), (
-            "Wrap models flag must be boolean value True or False."
-        )
+            assert (
+                target_kl >= 0
+            ), "Target KL divergence threshold must be greater than or equal to zero."
+        assert isinstance(
+            update_epochs, int
+        ), "Policy update epochs must be an integer."
+        assert (
+            update_epochs >= 1
+        ), "Policy update epochs must be greater than or equal to one."
+        assert isinstance(
+            wrap, bool
+        ), "Wrap models flag must be boolean value True or False."
 
         # New parameters for using RolloutBuffer
-        assert isinstance(use_rollout_buffer, bool), (
-            "Use rollout buffer flag must be boolean value True or False."
-        )
-        assert isinstance(recurrent, bool), (
-            "Has hidden states flag must be boolean value True or False."
-        )
-        assert isinstance(bptt_sequence_type, BPTTSequenceType), (
-            "bptt_sequence_type must be a BPTTSequenceType enum value."
-        )
+        assert isinstance(
+            use_rollout_buffer, bool
+        ), "Use rollout buffer flag must be boolean value True or False."
+        assert isinstance(
+            recurrent, bool
+        ), "Has hidden states flag must be boolean value True or False."
+        assert isinstance(
+            bptt_sequence_type, BPTTSequenceType
+        ), "bptt_sequence_type must be a BPTTSequenceType enum value."
 
         if not use_rollout_buffer:
             warnings.warn(
@@ -325,9 +325,7 @@ class PPO(RLAlgorithm):
             else (
                 optim.AdamW
                 if optimizer == "adamw"
-                else optim.Muon
-                if optimizer == "muon"
-                else None
+                else optim.Muon if optimizer == "muon" else None
             )
         )
         if optim_cls is None:
@@ -951,6 +949,8 @@ class PPO(RLAlgorithm):
             sum_approx_kl = torch.zeros((), device=self.device)
             sum_clip_fraction = torch.zeros((), device=self.device)
             sum_ev = torch.zeros((), device=self.device)
+            sum_actor_norm = torch.zeros((), device=self.device)
+            sum_critic_norm = torch.zeros((), device=self.device)
 
             for start_idx in range(0, num_samples, batch_size):
                 end_idx = min(start_idx + batch_size, num_samples)
@@ -1027,12 +1027,18 @@ class PPO(RLAlgorithm):
                 with self.timing_tracker.time_context("backward_pass_time"):
                     self.optimizer.zero_grad(set_to_none=True)
                     loss.backward()
-                    clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-                    clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+                    actor_norm = clip_grad_norm_(
+                        self.actor.parameters(), self.max_grad_norm
+                    )
+                    critic_norm = clip_grad_norm_(
+                        self.critic.parameters(), self.max_grad_norm
+                    )
                     self.optimizer.step()
 
                 # Track only minibatch count; aggregation happens after loop
                 sum_total_loss += loss.detach()
+                sum_actor_norm += actor_norm.detach()
+                sum_critic_norm += critic_norm.detach()
 
                 num_minibatches_this_epoch += 1
 
@@ -1083,6 +1089,12 @@ class PPO(RLAlgorithm):
             )
             self.learn_metrics.add(
                 "explained_variance", float((sum_ev * inv).detach().cpu())
+            )
+            self.learn_metrics.add(
+                "actor_grad_norm", float((sum_actor_norm * inv).detach().cpu())
+            )
+            self.learn_metrics.add(
+                "critic_grad_norm", float((sum_critic_norm * inv).detach().cpu())
             )
 
         # Free large references after training step
@@ -1177,6 +1189,8 @@ class PPO(RLAlgorithm):
             sum_approx_kl = torch.zeros((), device=self.device)
             sum_clip_fraction = torch.zeros((), device=self.device)
             sum_ev = torch.zeros((), device=self.device)
+            sum_actor_norm = torch.zeros((), device=self.device)
+            sum_critic_norm = torch.zeros((), device=self.device)
 
             for i in range(0, len(all_start_coords), sequences_per_minibatch):
                 current_coords_minibatch = all_start_coords[
@@ -1290,12 +1304,18 @@ class PPO(RLAlgorithm):
                 with self.timing_tracker.time_context("bptt_backward_pass_time"):
                     self.optimizer.zero_grad(set_to_none=True)
                     loss.backward()  # Gradients accumulate over the sequence within this backward call
-                    clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-                    clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+                    actor_norm = clip_grad_norm_(
+                        self.actor.parameters(), self.max_grad_norm
+                    )
+                    critic_norm = clip_grad_norm_(
+                        self.critic.parameters(), self.max_grad_norm
+                    )
                     self.optimizer.step()
 
                 # Track only counts; add aggregated metrics after loop
                 sum_total_loss += loss.detach()
+                sum_actor_norm += actor_norm.detach()
+                sum_critic_norm += critic_norm.detach()
 
                 num_minibatches_this_epoch += 1
 
@@ -1342,6 +1362,12 @@ class PPO(RLAlgorithm):
             )
             self.learn_metrics.add(
                 "explained_variance", float((sum_ev * inv).detach().cpu())
+            )
+            self.learn_metrics.add(
+                "actor_grad_norm", float((sum_actor_norm * inv).detach().cpu())
+            )
+            self.learn_metrics.add(
+                "critic_grad_norm", float((sum_critic_norm * inv).detach().cpu())
             )
 
     def add_collection_time(self, collection_time: float) -> None:
