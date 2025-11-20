@@ -393,7 +393,7 @@ def _collect_rollouts(
     *,
     recurrent: bool,
     reset_on_collect: bool = True,
-) -> Tuple[List[float], np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+) -> Tuple[List[float], np.ndarray, np.ndarray, np.ndarray, Dict[str, Any], float]:
     """Collect rollouts for on-policy algorithms using a modular hook system."""
     if not getattr(agent, "use_rollout_buffer", False):
         raise RuntimeError(
@@ -465,6 +465,8 @@ def _collect_rollouts(
                 step_data.update(hook_data)
 
             completed_episode_scores = []
+            total_reward_sum = 0.0
+            total_steps_count = 0
             for _ in range(n_steps):
                 current_hidden_state_for_buffer = current_hidden_state_for_actor
                 step_data["current_hidden_state_for_buffer"] = (
@@ -598,7 +600,12 @@ def _collect_rollouts(
                 # Add to buffer through primary hook
                 primary_hook.add_to_buffer(agent, buffer_data)
 
-                scores += np.atleast_1d(processed_reward)
+                # Accumulate rewards for mean step reward calculation
+                processed_reward_arr = np.atleast_1d(processed_reward)
+                total_reward_sum += np.sum(processed_reward_arr)
+                total_steps_count += len(processed_reward_arr)
+
+                scores += processed_reward_arr
                 done = np.atleast_1d(is_terminal)
                 done = done.astype(bool)
 
@@ -619,9 +626,9 @@ def _collect_rollouts(
                             ]
                             if reset_states_for_key.shape[1] > 0:
                                 # Detach to prevent gradient accumulation across episodes
-                                agent.hidden_state[key][:, finished_mask, :] = (
-                                    reset_states_for_key.detach()
-                                )
+                                agent.hidden_state[key][
+                                    :, finished_mask, :
+                                ] = reset_states_for_key.detach()
 
                 # Handle episode endings through hooks
                 for hook in hooks:
@@ -698,7 +705,12 @@ def _collect_rollouts(
     )
     agent.total_collection_time = agent.timing_tracker.get_time("rollout_collection")
 
-    return completed_episode_scores, obs, done, scores, info
+    # Calculate mean step reward
+    mean_step_reward = (
+        total_reward_sum / total_steps_count if total_steps_count > 0 else 0.0
+    )
+
+    return completed_episode_scores, obs, done, scores, info, mean_step_reward
 
 
 def collect_rollouts(
@@ -707,7 +719,7 @@ def collect_rollouts(
     n_steps: Optional[int] = None,
     reset_on_collect: bool = True,
     **kwargs,
-) -> List[float]:
+) -> Tuple[List[float], float]:
     """Collect rollouts for non-recurrent on-policy algorithms using modular hooks.
 
     This function automatically detects the agent type and applies appropriate
@@ -725,8 +737,8 @@ def collect_rollouts(
     :param reset_on_collect: Whether to reset the environment and agent state before collecting. Defaults to True.
     :type reset_on_collect: bool
 
-    :return: The list of scores for the episodes completed in the rollouts
-    :rtype: List[float]
+    :return: Tuple of (list of scores for completed episodes, mean step reward)
+    :rtype: Tuple[List[float], float]
     """
     # Extract last state if continuing from previous rollout
     last_obs_info = getattr(agent, "_last_obs", None)
@@ -737,7 +749,7 @@ def collect_rollouts(
     last_done = getattr(agent, "_last_done", None)
     last_scores = getattr(agent, "_last_scores", None)
 
-    completed_scores, _, _, _, _ = _collect_rollouts(
+    completed_scores, _, _, _, _, mean_step_reward = _collect_rollouts(
         agent,
         env,
         n_steps,
@@ -749,7 +761,7 @@ def collect_rollouts(
         reset_on_collect=reset_on_collect,
         **kwargs,
     )
-    return completed_scores
+    return completed_scores, mean_step_reward
 
 
 def collect_rollouts_recurrent(
@@ -758,7 +770,7 @@ def collect_rollouts_recurrent(
     n_steps: Optional[int] = None,
     reset_on_collect: bool = True,
     **kwargs,
-) -> List[float]:
+) -> Tuple[List[float], float]:
     """Collect rollouts for recurrent on-policy algorithms using modular hooks.
 
     This function automatically detects the agent type and applies appropriate
@@ -776,8 +788,8 @@ def collect_rollouts_recurrent(
     :param reset_on_collect: Whether to reset the environment and agent state before collecting. Defaults to True.
     :type reset_on_collect: bool
 
-    :return: The list of scores for the episodes completed in the rollouts
-    :rtype: List[float]
+    :return: Tuple of (list of scores for completed episodes, mean step reward)
+    :rtype: Tuple[List[float], float]
     """
     # Extract last state if continuing from previous rollout
     last_obs_info = getattr(agent, "_last_obs", None)
@@ -788,7 +800,7 @@ def collect_rollouts_recurrent(
     last_done = getattr(agent, "_last_done", None)
     last_scores = getattr(agent, "_last_scores", None)
 
-    completed_scores, _, _, _, _ = _collect_rollouts(
+    completed_scores, _, _, _, _, mean_step_reward = _collect_rollouts(
         agent,
         env,
         n_steps,
@@ -800,4 +812,4 @@ def collect_rollouts_recurrent(
         reset_on_collect=reset_on_collect,
         **kwargs,
     )
-    return completed_scores
+    return completed_scores, mean_step_reward
