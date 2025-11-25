@@ -35,7 +35,9 @@ def apply_action_mask_discrete(
     :return: Logits with mask applied.
     :rtype: torch.Tensor
     """
-    return torch.where(mask, logits, torch.full_like(logits, -1e8).to(logits.device))
+    # Use masked_fill instead of torch.where + torch.full_like
+    # This avoids creating a full tensor of -1e8 values
+    return logits.masked_fill(~mask, -1e8)
 
 
 class DistributionHandler(Protocol):
@@ -533,58 +535,31 @@ class EvolvableDistribution(EvolvableWrapper):
 
         return self.dist.entropy()
 
-    def apply_mask(self, logits: torch.Tensor, mask: ArrayOrTensor) -> torch.Tensor:
+    def apply_mask(self, logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """Apply a mask to the logits.
 
-        :param logits: Logits.
+        :param logits: Logits (already on device).
         :type logits: torch.Tensor
-        :param mask: Mask.
-        :type mask: ArrayOrTensor
+        :param mask: Mask (already converted to tensor and reshaped).
+        :type mask: torch.Tensor
         :return: Logits with mask applied.
         :rtype: torch.Tensor
         """
-        # Convert mask to tensor and reshape to match logits shape
-        mask = torch.as_tensor(mask, dtype=torch.bool, device=self.device).view(
-            logits.shape
-        )
-
-        if isinstance(self.action_space, spaces.Discrete):
-            masked_logits = apply_action_mask_discrete(logits, mask)
-        elif isinstance(self.action_space, (spaces.MultiDiscrete, spaces.MultiBinary)):
-            splits = (
-                list(self.action_space.nvec)
-                if isinstance(self.action_space, spaces.MultiDiscrete)
-                else [self.action_space.n]
-            )
-            # Split mask and logits into separate distributions
-            split_masks = torch.split(mask, splits, dim=1)
-            split_logits = torch.split(logits, splits, dim=1)
-
-            # Apply mask to each split
-            masked_logits = []
-            for split_logits, split_mask in zip(split_logits, split_masks):
-                masked_logits.append(
-                    apply_action_mask_discrete(split_logits, split_mask)
-                )
-
-            masked_logits = torch.cat(masked_logits, dim=1)
-        elif isinstance(self.action_space, spaces.Tuple):
+        # Vectorized masked_fill works for all discrete action spaces
+        # No need to split for MultiDiscrete - masked_fill is element-wise
+        if isinstance(self.action_space, spaces.Tuple):
             # Only mask the discrete part (first n logits)
             disc_space: spaces.Discrete = self.action_space.spaces[0]  # type: ignore[assignment]
             n = disc_space.n
             disc_logits = logits[:, :n]
             cont_logits = logits[:, n:]
-            mask = torch.as_tensor(mask, dtype=torch.bool, device=self.device)
             if mask.ndim == 1:
                 mask = mask.unsqueeze(0).expand_as(disc_logits)
-            masked_disc = apply_action_mask_discrete(disc_logits, mask)
-            masked_logits = torch.cat([masked_disc, cont_logits], dim=1)
+            masked_disc = disc_logits.masked_fill(~mask, -1e8)
+            return torch.cat([masked_disc, cont_logits], dim=1)
         else:
-            raise NotImplementedError(
-                f"Action space {self.action_space} not supported."
-            )
-
-        return masked_logits
+            # Discrete, MultiDiscrete, MultiBinary - single vectorized operation
+            return logits.masked_fill(~mask, -1e8)
 
     def build_dist_from_latent(self, latent, action_mask=None):
         logits = self.wrapped(latent)
@@ -625,14 +600,32 @@ class EvolvableDistribution(EvolvableWrapper):
         logits = self.wrapped(latent)
 
         if action_mask is not None:
-            if isinstance(action_mask, (np.ndarray, list)):
-                action_mask = (
-                    np.stack(action_mask)
-                    if action_mask.dtype == np.object_ or isinstance(action_mask, list)
-                    else action_mask
-                )
+            # Fast path: mask is already a bool tensor on correct device
+            if (
+                isinstance(action_mask, torch.Tensor)
+                and action_mask.dtype == torch.bool
+            ):
+                if action_mask.device != logits.device:
+                    action_mask = action_mask.to(logits.device, non_blocking=True)
+                mask_tensor = action_mask.view(logits.shape)
+            else:
+                # Slow path: convert from numpy/list
+                if isinstance(action_mask, (np.ndarray, list)):
+                    action_mask = (
+                        np.stack(action_mask)
+                        if (
+                            hasattr(action_mask, "dtype")
+                            and action_mask.dtype == np.object_
+                        )
+                        or isinstance(action_mask, list)
+                        else action_mask
+                    )
+                mask_tensor = torch.as_tensor(
+                    action_mask, dtype=torch.bool, device=self.device
+                ).view(logits.shape)
 
-            logits = self.apply_mask(logits, action_mask)
+            # Single vectorized masked_fill
+            logits = logits.masked_fill(~mask_tensor, -1e8)
 
         # Distribution from logits
         self.dist = self.get_distribution(logits)

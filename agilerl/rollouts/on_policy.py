@@ -404,6 +404,9 @@ def _collect_rollouts(
     if not hasattr(agent, "timing_tracker"):
         agent.timing_tracker = TimingTracker()
 
+    # Reset timing tracker at the start of rollout collection to ensure per-iteration stats
+    agent.timing_tracker.reset()
+
     # Get appropriate hooks for this agent
     hooks = get_rollout_hooks(agent)
     primary_hook = hooks[0]  # First hook handles the main logic
@@ -498,14 +501,15 @@ def _collect_rollouts(
                 step_data["action_mask"] = action_mask
 
                 # Get action, statistics and (maybe) recurrent hidden state from agent
-                if recurrent:
-                    action_result = agent.get_action(
-                        obs,
-                        action_mask=action_mask,
-                        hidden_state=current_hidden_state_for_actor,
-                    )
-                else:
-                    action_result = agent.get_action(obs, action_mask=action_mask)
+                with agent.timing_tracker.time_context("eval_forward"):
+                    if recurrent:
+                        action_result = agent.get_action(
+                            obs,
+                            action_mask=action_mask,
+                            hidden_state=current_hidden_state_for_actor,
+                        )
+                    else:
+                        action_result = agent.get_action(obs, action_mask=action_mask)
 
                 # Process action result through hooks
                 processed_result = primary_hook.process_action_result(
@@ -555,7 +559,8 @@ def _collect_rollouts(
                 else:
                     clipped_action = action
 
-                next_obs, reward, term, trunc, next_info = env.step(clipped_action)
+                with agent.timing_tracker.time_context("eval_env"):
+                    next_obs, reward, term, trunc, next_info = env.step(clipped_action)
 
                 # Process reward through hooks
                 processed_reward = primary_hook.process_reward(
@@ -581,24 +586,25 @@ def _collect_rollouts(
                 # Add next_info to step_data for hooks that need it (e.g., WPPO)
                 step_data["next_info"] = next_info
 
-                # Prepare buffer data through primary hook
-                buffer_data = primary_hook.prepare_buffer_data(
-                    agent,
-                    obs,
-                    action,
-                    processed_reward,
-                    is_terminal,
-                    value,
-                    log_prob,
-                    next_obs,
-                    current_hidden_state_for_buffer,
-                    step_data,
-                    timeout=timeout_flags,
-                )
+                with agent.timing_tracker.time_context("eval_copy"):
+                    # Prepare buffer data through primary hook
+                    buffer_data = primary_hook.prepare_buffer_data(
+                        agent,
+                        obs,
+                        action,
+                        processed_reward,
+                        is_terminal,
+                        value,
+                        log_prob,
+                        next_obs,
+                        current_hidden_state_for_buffer,
+                        step_data,
+                        timeout=timeout_flags,
+                    )
 
-                buffer_data["episode_start"] = last_episode_starts
-                # Add to buffer through primary hook
-                primary_hook.add_to_buffer(agent, buffer_data)
+                    buffer_data["episode_start"] = last_episode_starts
+                    # Add to buffer through primary hook
+                    primary_hook.add_to_buffer(agent, buffer_data)
 
                 # Accumulate rewards for mean step reward calculation
                 processed_reward_arr = np.atleast_1d(processed_reward)

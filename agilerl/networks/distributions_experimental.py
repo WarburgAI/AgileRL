@@ -30,12 +30,12 @@ def apply_action_mask_discrete(
     return logits.masked_fill(~mask, -1e8)
 
 
-# Compile the mask application for faster execution
-try:
-    apply_action_mask_discrete = torch.compile(apply_action_mask_discrete)
-except Exception:
-    # If torch.compile fails (e.g., unsupported platform), keep original
-    pass
+# # Compile the mask application for faster execution
+# try:
+#     apply_action_mask_discrete = torch.compile(apply_action_mask_discrete)
+# except Exception:
+#     # If torch.compile fails (e.g., unsupported platform), keep original
+#     pass
 
 
 class TorchDistribution:
@@ -411,53 +411,19 @@ class EvolvableDistribution(EvolvableWrapper):
         # The new TorchDistribution returns analytical entropy for supported spaces
         return self.dist.entropy()
 
-    def apply_mask(self, logits: torch.Tensor, mask: ArrayOrTensor) -> torch.Tensor:
+    def apply_mask(self, logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """Apply a mask to the logits.
 
-        :param logits: Logits.
+        :param logits: Logits (already on device).
         :type logits: torch.Tensor
-        :param mask: Mask.
-        :type mask: ArrayOrTensor
+        :param mask: Mask (already converted to tensor by forward()).
+        :type mask: torch.Tensor
         :return: Logits with mask applied.
         :rtype: torch.Tensor
         """
-        # Convert mask to tensor and reshape to match logits shape
-        mask = torch.as_tensor(mask, dtype=torch.bool, device=self.device).view(
-            logits.shape
-        )
-
-        if isinstance(self.action_space, spaces.Discrete):
-            masked_logits = apply_action_mask_discrete(logits, mask)
-        elif isinstance(self.action_space, (spaces.MultiDiscrete, spaces.MultiBinary)):
-            splits = (
-                list(self.action_space.nvec)
-                if isinstance(self.action_space, spaces.MultiDiscrete)
-                else [
-                    self.action_space.n
-                ]  # For MultiBinary, nvec is not present, use n
-            )
-            # Split mask and logits into separate distributions
-            split_masks = torch.split(mask, splits, dim=1)
-            split_logits = torch.split(logits, splits, dim=1)
-
-            # Apply mask to each split
-            masked_logits = []
-            for split_logits_i, split_mask_i in zip(
-                split_logits, split_masks
-            ):  # Renamed for clarity
-                masked_logits.append(
-                    apply_action_mask_discrete(split_logits_i, split_mask_i)
-                )
-
-            masked_logits = torch.cat(masked_logits, dim=1)
-        else:
-            # This should ideally not be reached if get_distribution handles the space,
-            # but keeping for safety.
-            raise NotImplementedError(
-                f"Action space {self.action_space} not supported for masking."
-            )
-
-        return masked_logits
+        # For MultiDiscrete/MultiBinary/Discrete: single vectorized masked_fill
+        # No need to split - masked_fill works element-wise on the full tensor
+        return logits.masked_fill(~mask, -1e8)
 
     def build_dist_from_latent(self, latent, action_mask=None):
         """Build a TorchDistribution from a latent representation.
@@ -508,34 +474,37 @@ class EvolvableDistribution(EvolvableWrapper):
         logits = self.wrapped(latent)
 
         if action_mask is not None:
-            if isinstance(action_mask, (np.ndarray, list)):
-                # Attempt to stack if it's a list of arrays or object array, typical for vectorized envs
-                if isinstance(action_mask, list) or (
-                    isinstance(action_mask, np.ndarray)
-                    and action_mask.dtype == np.object_
-                ):
-                    try:
-                        action_mask = np.stack(action_mask)
-                    except Exception:
-                        # If stacking fails, it might be a non-uniform list or other structure not directly convertible.
-                        # This path assumes action_mask should become a single tensor.
-                        # If it's already a correct tensor, as_tensor below handles it.
-                        pass  # Allow as_tensor to handle or raise error if still problematic
+            # Fast path: mask is already a bool tensor on correct device
+            if (
+                isinstance(action_mask, torch.Tensor)
+                and action_mask.dtype == torch.bool
+            ):
+                if action_mask.device != logits.device:
+                    action_mask = action_mask.to(logits.device, non_blocking=True)
+                mask_tensor = action_mask.view(logits.shape)
+            else:
+                # Slow path: need to convert from numpy/list
+                if isinstance(action_mask, (np.ndarray, list)):
+                    if isinstance(action_mask, list) or (
+                        isinstance(action_mask, np.ndarray)
+                        and action_mask.dtype == np.object_
+                    ):
+                        try:
+                            action_mask = np.stack(action_mask)
+                        except Exception:
+                            pass
 
-            # Optimization: Cache mask conversion to avoid repeated torch.as_tensor calls
-            # Check if this is the same mask object we already converted
-            mask_id = id(action_mask)
-            if mask_id != self._cached_mask_id:
-                # New mask, convert and cache it
-                self._cached_mask = torch.as_tensor(
-                    action_mask, device=self.device, dtype=torch.bool
-                )
-                self._cached_mask_id = mask_id
+                # Cache mask conversion to avoid repeated torch.as_tensor calls
+                mask_id = id(action_mask)
+                if mask_id != self._cached_mask_id:
+                    self._cached_mask = torch.as_tensor(
+                        action_mask, device=self.device, dtype=torch.bool
+                    )
+                    self._cached_mask_id = mask_id
+                mask_tensor = self._cached_mask.view(logits.shape)
 
-            # Use cached mask
-            action_mask = self._cached_mask
-
-            logits = self.apply_mask(logits, action_mask)
+            # Single vectorized masked_fill - no splits needed
+            logits = logits.masked_fill(~mask_tensor, -1e8)
 
         # Distribution from logits
         # get_distribution now creates the new TorchDistribution object

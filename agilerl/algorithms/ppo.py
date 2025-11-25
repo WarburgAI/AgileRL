@@ -1,6 +1,7 @@
 import copy
 import gc
 import math
+import os
 import warnings
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
@@ -118,7 +119,7 @@ class PPO(RLAlgorithm):
         max_grad_norm: float = 0.5,
         target_kl: Optional[float] = None,
         normalize_images: bool = True,
-        normalize_rewards: bool = True,
+        normalize_rewards: bool = False,
         update_epochs: int = 4,
         actor_network: Optional[EvolvableModule] = None,
         critic_network: Optional[EvolvableModule] = None,
@@ -132,6 +133,7 @@ class PPO(RLAlgorithm):
         wrap: bool = True,
         bptt_sequence_type: BPTTSequenceType = BPTTSequenceType.CHUNKED,
         torch_compiler: Optional[Any] = None,
+        use_experimental_distributions: Optional[bool] = None,
     ) -> None:
         super().__init__(
             observation_space,
@@ -263,6 +265,12 @@ class PPO(RLAlgorithm):
         self.num_envs = num_envs
         self.rollout_buffer_config = rollout_buffer_config
         self.bptt_sequence_type = bptt_sequence_type
+        self.use_experimental_distributions = (
+            use_experimental_distributions
+            if use_experimental_distributions is not None
+            else os.environ.get("USE_EXPERIMENTAL_DISTRIBUTIONS", "false").lower()
+            == "true"
+        )
 
         if actor_network is not None and critic_network is not None:
             if not isinstance(actor_network, EvolvableModule):
@@ -299,6 +307,7 @@ class PPO(RLAlgorithm):
                 device=self.device,
                 recurrent=self.recurrent,
                 encoder_name=("shared_encoder" if share_encoders else "actor_encoder"),
+                use_experimental_distribution=self.use_experimental_distributions,
                 **net_config_dict,
             )
 
@@ -638,8 +647,16 @@ class PPO(RLAlgorithm):
                     action_np, self.action_space.low, self.action_space.high
                 )
 
-        log_prob_np = log_prob.cpu().data.numpy()
-        entropy_np = entropy.cpu().data.numpy()
+        log_prob_np = (
+            log_prob.cpu().data.numpy()
+            if log_prob is not None
+            else np.zeros(action_np.shape[0], dtype=np.float32)
+        )
+        entropy_np = (
+            entropy.cpu().data.numpy()
+            if entropy is not None
+            else np.zeros(action_np.shape[0], dtype=np.float32)
+        )
         values_np = values.cpu().data.numpy()
 
         if self.recurrent:
