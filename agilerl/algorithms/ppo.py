@@ -433,11 +433,12 @@ class PPO(RLAlgorithm):
         *,
         sample: bool = True,
         deterministic: bool = False,
+        compute_values: bool = False,
     ) -> Tuple[
         ArrayOrTensor,
         torch.Tensor,
         torch.Tensor,
-        torch.Tensor,
+        Optional[torch.Tensor],
         Optional[Dict[str, ArrayOrTensor]],
     ]:
         """
@@ -453,8 +454,10 @@ class PPO(RLAlgorithm):
         :type sample: bool
         :param deterministic: Whether to return a deterministic action, defaults to False
         :type deterministic: bool, optional
-        :return: Action, log probability, entropy, state values, and (if recurrent) next hidden state
-        :rtype: Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[Dict[str, ArrayOrTensor]]]
+        :param compute_values: Whether to compute values from critic, defaults to False for speed
+        :type compute_values: bool
+        :return: Action, log probability, entropy, state values (or None), and (if recurrent) next hidden state
+        :rtype: Tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[Dict[str, ArrayOrTensor]]]
         """
         if hidden_state is not None:
             latent_pi, next_hidden_actor = self.actor.extract_features(
@@ -469,18 +472,22 @@ class PPO(RLAlgorithm):
 
             # Start with actor's next hidden state
             next_hidden_combined: Dict[str, torch.Tensor] = next_hidden_actor
-            if self.share_encoders:
-                values = self.critic.forward_head(latent_pi).squeeze(-1)
-            else:
-                # If not sharing, critic might have its own hidden state components or update existing ones
-                values, next_hidden_critic = self.critic(
-                    obs, hidden_state=hidden_state
-                )  # Pass original hidden_state
-                values = values.squeeze(-1)
 
-                # Merge if critic returns its own next_hidden
-                if next_hidden_critic is not None:
-                    next_hidden_combined.update(next_hidden_critic)
+            if compute_values:
+                if self.share_encoders:
+                    values = self.critic.forward_head(latent_pi).squeeze(-1)
+                else:
+                    # If not sharing, critic might have its own hidden state components or update existing ones
+                    values, next_hidden_critic = self.critic(
+                        obs, hidden_state=hidden_state
+                    )  # Pass original hidden_state
+                    values = values.squeeze(-1)
+
+                    # Merge if critic returns its own next_hidden
+                    if next_hidden_critic is not None:
+                        next_hidden_combined.update(next_hidden_critic)
+            else:
+                values = None
 
             return action, log_prob, entropy, values, next_hidden_combined
         else:
@@ -491,15 +498,20 @@ class PPO(RLAlgorithm):
                 sample=sample,
                 deterministic=deterministic,
             )
-            if self.share_encoders:
-                values = self.critic.forward_head(latent_pi).squeeze(-1)
-            else:
-                critic_output = self.critic(obs)
-                # Handle case where critic returns tuple (recurrent critic with hidden_state=None)
-                if isinstance(critic_output, tuple):
-                    values = critic_output[0].squeeze(-1)
+
+            if compute_values:
+                if self.share_encoders:
+                    values = self.critic.forward_head(latent_pi).squeeze(-1)
                 else:
-                    values = critic_output.squeeze(-1)
+                    critic_output = self.critic(obs)
+                    # Handle case where critic returns tuple (recurrent critic with hidden_state=None)
+                    if isinstance(critic_output, tuple):
+                        values = critic_output[0].squeeze(-1)
+                    else:
+                        values = critic_output.squeeze(-1)
+            else:
+                values = None
+
             return action, log_prob, entropy, values, None
 
     def get_hidden_state_architecture(self) -> Dict[str, Tuple[int, ...]]:
@@ -587,15 +599,18 @@ class PPO(RLAlgorithm):
         action_mask: Optional[ArrayOrTensor] = None,
         hidden_state: Optional[Dict[str, ArrayOrTensor]] = None,
         deterministic: bool = False,
+        compute_values: bool = False,
     ) -> Union[
         Tuple[
             np.ndarray,  # action
             np.ndarray,  # log_prob
             np.ndarray,  # entropy
-            np.ndarray,  # values
+            Optional[np.ndarray],  # values (None if compute_values=False)
             Optional[Dict[str, ArrayOrTensor]],  # next_hidden_state
         ],
-        Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],  # non-recurrent case
+        Tuple[
+            np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]
+        ],  # non-recurrent case
     ]:
         """Returns the next action to take in the environment.
 
@@ -607,8 +622,10 @@ class PPO(RLAlgorithm):
         :type hidden_state: Optional[Dict[str, ArrayOrTensor]]
         :param deterministic: Boolean specifying whether to desired action is stochastic or deterministic, defaults to False
         :type deterministic: bool, optional
-        :return: Action, log probability, entropy, state values, and (if recurrent) next hidden state
-        :rtype: Union[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Optional[Dict[str, ArrayOrTensor]]], Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]
+        :param compute_values: Whether to compute values from critic, defaults to False for speed
+        :type compute_values: bool
+        :return: Action, log probability, entropy, state values (or None), and (if recurrent) next hidden state
+        :rtype: Union[Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray], Optional[Dict[str, ArrayOrTensor]]], Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]]
         """
         obs = self.preprocess_observation(obs)
         with torch.no_grad():
@@ -619,6 +636,7 @@ class PPO(RLAlgorithm):
                     hidden_state,
                     sample=not deterministic,
                     deterministic=deterministic,
+                    compute_values=compute_values,
                 )
             )
 
@@ -657,7 +675,7 @@ class PPO(RLAlgorithm):
             if entropy is not None
             else np.zeros(action_np.shape[0], dtype=np.float32)
         )
-        values_np = values.cpu().data.numpy()
+        values_np = values.cpu().data.numpy() if values is not None else None
 
         if self.recurrent:
             return (

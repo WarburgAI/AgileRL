@@ -96,6 +96,7 @@ class RolloutBuffer:
         self.pos = 0
         self.full = False
         self._initialize_buffers()
+        self._cache_tensor_refs()
 
     def _initialize_buffers(self) -> None:
         """Initialize buffer arrays with correct shapes for vectorized environments."""
@@ -257,6 +258,76 @@ class RolloutBuffer:
             batch_size=[self.capacity, self.num_envs],
             device="cpu",  # Keep buffer on CPU for memory efficiency, move to device in get_tensor_batch
         )
+
+    def _cache_tensor_refs(self) -> None:
+        """Cache direct tensor references to avoid TensorDict lookup overhead in hot path."""
+        # Cache direct tensor references for ultrafast access
+        self._obs_tensor = self.buffer["observations"]
+        self._action_tensor = self.buffer["actions"]
+        self._reward_tensor = self.buffer["rewards"]
+        self._done_tensor = self.buffer["dones"]
+        self._value_tensor = self.buffer["values"]
+        self._logprob_tensor = self.buffer["log_probs"]
+        self._next_obs_tensor = self.buffer["next_observations"]
+        self._episode_start_tensor = self.buffer["episode_starts"]
+        self._timeout_tensor = self.buffer["timeouts"]
+        self._has_action_masks = "action_masks" in self.buffer.keys()
+        if self._has_action_masks:
+            self._action_mask_tensor = self.buffer["action_masks"]
+        else:
+            self._action_mask_tensor = None
+
+    def add_ultrafast(
+        self,
+        obs: np.ndarray,
+        action: np.ndarray,
+        reward: np.ndarray,
+        done: np.ndarray,
+        value: np.ndarray,
+        log_prob: np.ndarray,
+        next_obs: np.ndarray,
+        episode_start: np.ndarray,
+        action_mask: Optional[np.ndarray] = None,
+        timeouts: Optional[np.ndarray] = None,
+    ) -> None:
+        """Ultra-fast path for adding data - uses cached tensor refs, minimal overhead.
+
+        IMPORTANT: All inputs MUST be contiguous numpy arrays with correct dtypes:
+        - obs, next_obs: float32
+        - action: correct dtype for action space
+        - reward, value, log_prob: float32
+        - done, episode_start, timeouts: bool
+        - action_mask: bool
+
+        This method does NO validation for maximum speed.
+        """
+        pos = self.pos
+
+        # Direct tensor writes using cached references - no TensorDict lookup
+        self._obs_tensor[pos].copy_(torch.from_numpy(obs), non_blocking=True)
+        self._action_tensor[pos].copy_(torch.from_numpy(action), non_blocking=True)
+        self._reward_tensor[pos].copy_(torch.from_numpy(reward), non_blocking=True)
+        self._done_tensor[pos].copy_(torch.from_numpy(done), non_blocking=True)
+        self._value_tensor[pos].copy_(torch.from_numpy(value), non_blocking=True)
+        self._logprob_tensor[pos].copy_(torch.from_numpy(log_prob), non_blocking=True)
+        self._next_obs_tensor[pos].copy_(torch.from_numpy(next_obs), non_blocking=True)
+        self._episode_start_tensor[pos].copy_(
+            torch.from_numpy(episode_start), non_blocking=True
+        )
+
+        if timeouts is not None:
+            self._timeout_tensor[pos].copy_(
+                torch.from_numpy(timeouts), non_blocking=True
+            )
+
+        if action_mask is not None and self._has_action_masks:
+            self._action_mask_tensor[pos].copy_(
+                torch.from_numpy(action_mask), non_blocking=True
+            )
+
+        self.pos = pos + 1
+        if self.pos == self.capacity:
+            self.full = True
 
     def add(
         self,
@@ -446,6 +517,76 @@ class RolloutBuffer:
         self.buffer[self.pos] = current_td_slice
 
         # Update buffer position
+        self.pos += 1
+        if self.pos == self.capacity:
+            self.full = True
+
+    def add_fast(
+        self,
+        obs: np.ndarray,
+        action: np.ndarray,
+        reward: np.ndarray,
+        done: np.ndarray,
+        value: np.ndarray,
+        log_prob: np.ndarray,
+        next_obs: Optional[np.ndarray] = None,
+        hidden_state: Optional[Dict[str, torch.Tensor]] = None,
+        episode_start: Optional[np.ndarray] = None,
+        action_mask: Optional[np.ndarray] = None,
+        timeouts: Optional[np.ndarray] = None,
+        **kwargs,  # Ignore extra kwargs for compatibility
+    ) -> None:
+        """Fast path for adding data to buffer - bypasses TensorDict overhead.
+
+        Assumes all inputs are numpy arrays with correct shapes (no validation).
+        For maximum performance in hot loops.
+        """
+        if self.pos == self.capacity:
+            if self.wrap_at_capacity:
+                self.pos = 0
+            else:
+                raise ValueError(f"Buffer full at capacity {self.capacity}")
+
+        pos = self.pos
+
+        # Direct tensor assignment - much faster than TensorDict slice assignment
+        # Use torch.from_numpy for zero-copy when possible
+        self.buffer["observations"][pos].copy_(torch.from_numpy(obs))
+        self.buffer["actions"][pos].copy_(torch.from_numpy(action))
+        self.buffer["rewards"][pos].copy_(torch.from_numpy(reward.astype(np.float32)))
+        self.buffer["dones"][pos].copy_(torch.from_numpy(done.astype(bool)))
+        self.buffer["values"][pos].copy_(torch.from_numpy(value.astype(np.float32)))
+        self.buffer["log_probs"][pos].copy_(
+            torch.from_numpy(log_prob.astype(np.float32))
+        )
+
+        if next_obs is not None:
+            self.buffer["next_observations"][pos].copy_(torch.from_numpy(next_obs))
+
+        if episode_start is not None:
+            self.buffer["episode_starts"][pos].copy_(
+                torch.from_numpy(episode_start.astype(bool))
+            )
+        else:
+            self.buffer["episode_starts"][pos].fill_(False)
+
+        if timeouts is not None:
+            self.buffer["timeouts"][pos].copy_(torch.from_numpy(timeouts.astype(bool)))
+        else:
+            self.buffer["timeouts"][pos].fill_(False)
+
+        if action_mask is not None and "action_masks" in self.buffer.keys():
+            self.buffer["action_masks"][pos].copy_(
+                torch.from_numpy(action_mask.astype(bool))
+            )
+
+        if self.recurrent and hidden_state is not None:
+            for key, ppo_tensor_val in hidden_state.items():
+                # ppo_tensor_val shape: (layers, num_envs, size) -> (num_envs, layers, size)
+                self.buffer["hidden_states"][key][pos].copy_(
+                    ppo_tensor_val.permute(1, 0, 2).detach().cpu()
+                )
+
         self.pos += 1
         if self.pos == self.capacity:
             self.full = True

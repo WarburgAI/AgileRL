@@ -284,7 +284,9 @@ if __name__ == "__main__":
 
             for idx_step in range(500):
                 # Get next action from agent
-                action, log_prob, _, value = agent.get_action(state)
+                action, log_prob, _, value = agent.get_action(
+                    state, compute_values=True
+                )
 
                 # Internal loop to execute trained skill
                 skill_agent = trained_skills[action[0]]["agent"]

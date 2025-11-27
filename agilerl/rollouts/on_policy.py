@@ -80,25 +80,123 @@ class RolloutHook(ABC):
 
     def add_to_buffer(self, agent, buffer_data: Dict[str, Any]) -> None:
         """Add data to the rollout buffer."""
-        # Standard buffer addition
-        reward_np = np.atleast_1d(buffer_data["reward"])
-        done_np = np.atleast_1d(buffer_data["done"])
-        value_np = np.atleast_1d(buffer_data["value"])
-        log_prob_np = np.atleast_1d(buffer_data["log_prob"])
+        # Use ultrafast path if available (cached tensor refs, no TensorDict overhead)
+        if (
+            hasattr(agent.rollout_buffer, "add_ultrafast")
+            and buffer_data["hidden_state"] is None
+        ):
+            # Ensure correct dtypes for ultrafast path (avoid copies in hot loop)
+            obs = buffer_data["obs"]
+            action = buffer_data["action"]
+            next_obs = buffer_data["next_obs"]
 
-        agent.rollout_buffer.add(
-            obs=buffer_data["obs"],
-            action=buffer_data["action"],
-            reward=reward_np,
-            done=done_np,
-            value=value_np,
-            log_prob=log_prob_np,
-            next_obs=buffer_data["next_obs"],
-            hidden_state=buffer_data["hidden_state"],
-            episode_start=np.atleast_1d(buffer_data["episode_start"]),
-            action_mask=buffer_data.get("action_mask", None),
-            timeouts=buffer_data.get("timeouts", np.zeros(agent.num_envs, dtype=bool)),
-        )
+            # These may need dtype conversion - do it efficiently
+            reward = buffer_data["reward"]
+            if not isinstance(reward, np.ndarray):
+                reward = np.asarray(reward, dtype=np.float32)
+            elif reward.dtype != np.float32:
+                reward = reward.astype(np.float32, copy=False)
+            reward = np.atleast_1d(reward)
+
+            value = buffer_data["value"]
+            if not isinstance(value, np.ndarray):
+                value = np.asarray(value, dtype=np.float32)
+            elif value.dtype != np.float32:
+                value = value.astype(np.float32, copy=False)
+            value = np.atleast_1d(value)
+
+            log_prob = buffer_data["log_prob"]
+            if not isinstance(log_prob, np.ndarray):
+                log_prob = np.asarray(log_prob, dtype=np.float32)
+            elif log_prob.dtype != np.float32:
+                log_prob = log_prob.astype(np.float32, copy=False)
+            log_prob = np.atleast_1d(log_prob)
+
+            done = buffer_data["done"]
+            if not isinstance(done, np.ndarray):
+                done = np.asarray(done, dtype=bool)
+            elif done.dtype != bool:
+                done = done.astype(bool, copy=False)
+            done = np.atleast_1d(done)
+
+            episode_start = buffer_data["episode_start"]
+            if not isinstance(episode_start, np.ndarray):
+                episode_start = np.asarray(episode_start, dtype=bool)
+            elif episode_start.dtype != bool:
+                episode_start = episode_start.astype(bool, copy=False)
+            episode_start = np.atleast_1d(episode_start)
+
+            timeouts = buffer_data.get("timeouts")
+            if timeouts is not None:
+                if not isinstance(timeouts, np.ndarray):
+                    timeouts = np.asarray(timeouts, dtype=bool)
+                elif timeouts.dtype != bool:
+                    timeouts = timeouts.astype(bool, copy=False)
+
+            action_mask = buffer_data.get("action_mask")
+            if action_mask is not None and action_mask.dtype != bool:
+                action_mask = action_mask.astype(bool, copy=False)
+
+            agent.rollout_buffer.add_ultrafast(
+                obs=obs,
+                action=action,
+                reward=reward,
+                done=done,
+                value=value,
+                log_prob=log_prob,
+                next_obs=next_obs,
+                episode_start=episode_start,
+                action_mask=action_mask,
+                timeouts=timeouts,
+            )
+        elif hasattr(agent.rollout_buffer, "add_fast"):
+            # Fast path - bypasses some TensorDict overhead
+            reward_np = np.atleast_1d(buffer_data["reward"])
+            done_np = np.atleast_1d(buffer_data["done"])
+            value_np = np.atleast_1d(buffer_data["value"])
+            log_prob_np = np.atleast_1d(buffer_data["log_prob"])
+            episode_start_np = np.atleast_1d(buffer_data["episode_start"])
+            timeouts_np = buffer_data.get(
+                "timeouts", np.zeros(agent.num_envs, dtype=bool)
+            )
+
+            agent.rollout_buffer.add_fast(
+                obs=buffer_data["obs"],
+                action=buffer_data["action"],
+                reward=reward_np,
+                done=done_np,
+                value=value_np,
+                log_prob=log_prob_np,
+                next_obs=buffer_data["next_obs"],
+                hidden_state=buffer_data["hidden_state"],
+                episode_start=episode_start_np,
+                action_mask=buffer_data.get("action_mask", None),
+                timeouts=timeouts_np,
+            )
+        else:
+            # Slow path - full TensorDict overhead
+            reward_np = np.atleast_1d(buffer_data["reward"])
+            done_np = np.atleast_1d(buffer_data["done"])
+            value_np = np.atleast_1d(buffer_data["value"])
+            log_prob_np = np.atleast_1d(buffer_data["log_prob"])
+            episode_start_np = np.atleast_1d(buffer_data["episode_start"])
+            timeouts_np = buffer_data.get(
+                "timeouts", np.zeros(agent.num_envs, dtype=bool)
+            )
+
+            agent.rollout_buffer.add(
+                obs=buffer_data["obs"],
+                action=buffer_data["action"],
+                reward=reward_np,
+                done=done_np,
+                value=value_np,
+                log_prob=log_prob_np,
+                next_obs=buffer_data["next_obs"],
+                hidden_state=buffer_data["hidden_state"],
+                episode_start=episode_start_np,
+                action_mask=buffer_data.get("action_mask", None),
+                timeouts=timeouts_np,
+            )
 
     def on_episode_end(
         self, agent, env_idx: int, is_terminal: np.ndarray, step_data: Dict[str, Any]
@@ -507,9 +605,12 @@ def _collect_rollouts(
                             obs,
                             action_mask=action_mask,
                             hidden_state=current_hidden_state_for_actor,
+                            compute_values=True,  # Need values for GAE
                         )
                     else:
-                        action_result = agent.get_action(obs, action_mask=action_mask)
+                        action_result = agent.get_action(
+                            obs, action_mask=action_mask, compute_values=True
+                        )
 
                 # Process action result through hooks
                 processed_result = primary_hook.process_action_result(
@@ -672,10 +773,12 @@ def _collect_rollouts(
                 action_result = agent._get_action_and_values(
                     agent.preprocess_observation(obs),
                     hidden_state=agent.hidden_state,
+                    compute_values=True,  # Need last value for GAE bootstrap
                 )
             else:
                 action_result = agent._get_action_and_values(
-                    agent.preprocess_observation(obs)
+                    agent.preprocess_observation(obs),
+                    compute_values=True,  # Need last value for GAE bootstrap
                 )
             last_value = action_result[3]
 

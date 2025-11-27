@@ -263,7 +263,9 @@ def test_returns_expected_action(observation_space, action_space, build_ppo, req
     state = observation_space.sample()
 
     # First with grad=False
-    action, action_logprob, dist_entropy, state_values = build_ppo.get_action(state)
+    action, action_logprob, dist_entropy, state_values = build_ppo.get_action(
+        state, compute_values=True
+    )
 
     assert isinstance(action, np.ndarray)
     assert isinstance(action_logprob, np.ndarray)
@@ -1176,7 +1178,7 @@ def test_ppo_with_hidden_states(
     hidden_state = ppo.get_initial_hidden_state()
 
     action, log_prob, entropy, value, next_hidden = ppo.get_action(
-        obs, hidden_state=hidden_state
+        obs, hidden_state=hidden_state, compute_values=True
     )
 
     assert action.shape[0] == 1
@@ -1217,7 +1219,7 @@ def test_ppo_with_hidden_states_multiple_obs(vector_space, discrete_space):
     hidden_state = ppo.get_initial_hidden_state(num_envs=num_envs)
 
     action, log_prob, entropy, value, next_hidden = ppo.get_action(
-        obs, hidden_state=hidden_state
+        obs, hidden_state=hidden_state, compute_values=True
     )
 
     assert action.shape[0] == num_envs
@@ -1258,7 +1260,7 @@ def test_ppo_with_hidden_states_multiple_envs():
     hidden_state = ppo.get_initial_hidden_state(num_envs=num_envs)
 
     action, log_prob, entropy, value, next_hidden = ppo.get_action(
-        obs, hidden_state=hidden_state
+        obs, hidden_state=hidden_state, compute_values=True
     )
 
     assert action.shape[0] == num_envs

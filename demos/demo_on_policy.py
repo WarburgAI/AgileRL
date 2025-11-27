@@ -112,7 +112,9 @@ if __name__ == "__main__":
 
                 for idx_step in range(-(agent.learn_step // -num_envs)):
                     # Get next action from agent
-                    action, log_prob, _, value = agent.get_action(obs)
+                    action, log_prob, _, value = agent.get_action(
+                        obs, compute_values=True
+                    )
 
                     # Act in environment
                     next_obs, reward, terminated, truncated, info = env.step(action)
