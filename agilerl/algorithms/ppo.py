@@ -891,7 +891,7 @@ class PPO(RLAlgorithm):
         self.total_learn_time += self.last_learn_time
 
         # clear cache
-        gc.collect()
+        # gc.collect()
 
         # Clear CUDA cache after training to free memory
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):

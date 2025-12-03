@@ -30,7 +30,16 @@ class RolloutHook(ABC):
         self, agent, env, n_steps: int, reset_on_collect: bool
     ) -> Dict[str, Any]:
         """Called at the start of rollout collection."""
-        return {}
+        # Cache the add method to avoid hasattr checks in the loop
+        add_method = None
+        if hasattr(agent.rollout_buffer, "add_ultrafast"):
+            add_method = agent.rollout_buffer.add_ultrafast
+        elif hasattr(agent.rollout_buffer, "add_fast"):
+            add_method = agent.rollout_buffer.add_fast
+        else:
+            add_method = agent.rollout_buffer.add
+
+        return {"_buffer_add_method": add_method}
 
     def on_step_start(
         self, agent, obs, info, step_data: Dict[str, Any]
@@ -80,64 +89,48 @@ class RolloutHook(ABC):
 
     def add_to_buffer(self, agent, buffer_data: Dict[str, Any]) -> None:
         """Add data to the rollout buffer."""
+        # Use cached method if available
+        add_method = buffer_data.get("_buffer_add_method")
+
         # Use ultrafast path if available (cached tensor refs, no TensorDict overhead)
         if (
             hasattr(agent.rollout_buffer, "add_ultrafast")
             and buffer_data["hidden_state"] is None
         ):
+            # Optimize data preparation using np.array with copy=False and ndmin=1
+            # This replaces multiple isinstance/asarray/astype/atleast_1d calls with single C-level calls
+
             # Ensure correct dtypes for ultrafast path (avoid copies in hot loop)
             obs = buffer_data["obs"]
             action = buffer_data["action"]
             next_obs = buffer_data["next_obs"]
 
-            # These may need dtype conversion - do it efficiently
-            reward = buffer_data["reward"]
-            if not isinstance(reward, np.ndarray):
-                reward = np.asarray(reward, dtype=np.float32)
-            elif reward.dtype != np.float32:
-                reward = reward.astype(np.float32, copy=False)
-            reward = np.atleast_1d(reward)
-
-            value = buffer_data["value"]
-            if not isinstance(value, np.ndarray):
-                value = np.asarray(value, dtype=np.float32)
-            elif value.dtype != np.float32:
-                value = value.astype(np.float32, copy=False)
-            value = np.atleast_1d(value)
-
-            log_prob = buffer_data["log_prob"]
-            if not isinstance(log_prob, np.ndarray):
-                log_prob = np.asarray(log_prob, dtype=np.float32)
-            elif log_prob.dtype != np.float32:
-                log_prob = log_prob.astype(np.float32, copy=False)
-            log_prob = np.atleast_1d(log_prob)
-
-            done = buffer_data["done"]
-            if not isinstance(done, np.ndarray):
-                done = np.asarray(done, dtype=bool)
-            elif done.dtype != bool:
-                done = done.astype(bool, copy=False)
-            done = np.atleast_1d(done)
-
-            episode_start = buffer_data["episode_start"]
-            if not isinstance(episode_start, np.ndarray):
-                episode_start = np.asarray(episode_start, dtype=bool)
-            elif episode_start.dtype != bool:
-                episode_start = episode_start.astype(bool, copy=False)
-            episode_start = np.atleast_1d(episode_start)
+            reward = np.array(
+                buffer_data["reward"], dtype=np.float32, copy=False, ndmin=1
+            )
+            value = np.array(
+                buffer_data["value"], dtype=np.float32, copy=False, ndmin=1
+            )
+            log_prob = np.array(
+                buffer_data["log_prob"], dtype=np.float32, copy=False, ndmin=1
+            )
+            done = np.array(buffer_data["done"], dtype=bool, copy=False, ndmin=1)
+            episode_start = np.array(
+                buffer_data["episode_start"], dtype=bool, copy=False, ndmin=1
+            )
 
             timeouts = buffer_data.get("timeouts")
             if timeouts is not None:
-                if not isinstance(timeouts, np.ndarray):
-                    timeouts = np.asarray(timeouts, dtype=bool)
-                elif timeouts.dtype != bool:
-                    timeouts = timeouts.astype(bool, copy=False)
+                timeouts = np.array(timeouts, dtype=bool, copy=False, ndmin=1)
 
             action_mask = buffer_data.get("action_mask")
-            if action_mask is not None and action_mask.dtype != bool:
-                action_mask = action_mask.astype(bool, copy=False)
+            if action_mask is not None:
+                # action mask usually needs to be kept as is, but ensure bool if provided
+                if action_mask.dtype != bool:
+                    action_mask = action_mask.astype(bool, copy=False)
 
-            agent.rollout_buffer.add_ultrafast(
+            # Use the method directly (should be add_ultrafast)
+            (add_method or agent.rollout_buffer.add_ultrafast)(
                 obs=obs,
                 action=action,
                 reward=reward,
@@ -151,14 +144,18 @@ class RolloutHook(ABC):
             )
         elif hasattr(agent.rollout_buffer, "add_fast"):
             # Fast path - bypasses some TensorDict overhead
-            reward_np = np.atleast_1d(buffer_data["reward"])
-            done_np = np.atleast_1d(buffer_data["done"])
-            value_np = np.atleast_1d(buffer_data["value"])
-            log_prob_np = np.atleast_1d(buffer_data["log_prob"])
-            episode_start_np = np.atleast_1d(buffer_data["episode_start"])
-            timeouts_np = buffer_data.get(
-                "timeouts", np.zeros(agent.num_envs, dtype=bool)
+            reward_np = np.array(buffer_data["reward"], copy=False, ndmin=1)
+            done_np = np.array(buffer_data["done"], copy=False, ndmin=1)
+            value_np = np.array(buffer_data["value"], copy=False, ndmin=1)
+            log_prob_np = np.array(buffer_data["log_prob"], copy=False, ndmin=1)
+            episode_start_np = np.array(
+                buffer_data["episode_start"], copy=False, ndmin=1
             )
+            timeouts_np = buffer_data.get("timeouts")
+            if timeouts_np is None:
+                timeouts_np = np.zeros(agent.num_envs, dtype=bool)
+            else:
+                timeouts_np = np.array(timeouts_np, dtype=bool, copy=False, ndmin=1)
 
             agent.rollout_buffer.add_fast(
                 obs=buffer_data["obs"],
@@ -175,14 +172,18 @@ class RolloutHook(ABC):
             )
         else:
             # Slow path - full TensorDict overhead
-            reward_np = np.atleast_1d(buffer_data["reward"])
-            done_np = np.atleast_1d(buffer_data["done"])
-            value_np = np.atleast_1d(buffer_data["value"])
-            log_prob_np = np.atleast_1d(buffer_data["log_prob"])
-            episode_start_np = np.atleast_1d(buffer_data["episode_start"])
-            timeouts_np = buffer_data.get(
-                "timeouts", np.zeros(agent.num_envs, dtype=bool)
+            reward_np = np.array(buffer_data["reward"], copy=False, ndmin=1)
+            done_np = np.array(buffer_data["done"], copy=False, ndmin=1)
+            value_np = np.array(buffer_data["value"], copy=False, ndmin=1)
+            log_prob_np = np.array(buffer_data["log_prob"], copy=False, ndmin=1)
+            episode_start_np = np.array(
+                buffer_data["episode_start"], copy=False, ndmin=1
             )
+            timeouts_np = buffer_data.get("timeouts")
+            if timeouts_np is None:
+                timeouts_np = np.zeros(agent.num_envs, dtype=bool)
+            else:
+                timeouts_np = np.array(timeouts_np, dtype=bool, copy=False, ndmin=1)
 
             agent.rollout_buffer.add(
                 obs=buffer_data["obs"],
@@ -534,11 +535,15 @@ def _collect_rollouts(
                 done = np.zeros(agent.num_envs)
 
                 # Reset agent hidden state
-                agent.hidden_state = (
-                    agent.get_initial_hidden_state(agent.num_envs)
-                    if recurrent
-                    else None
-                )
+                # Cache initial hidden state for reuse during rollout
+                if recurrent:
+                    cached_initial_hidden_state = agent.get_initial_hidden_state(
+                        agent.num_envs
+                    )
+                    agent.hidden_state = cached_initial_hidden_state
+                else:
+                    cached_initial_hidden_state = None
+                    agent.hidden_state = None
             else:
                 # Continue from last state
                 obs = last_obs
@@ -549,6 +554,14 @@ def _collect_rollouts(
                 )
                 scores = last_scores
                 info = last_info
+
+                # Cache initial hidden state if not already cached
+                if recurrent:
+                    cached_initial_hidden_state = agent.get_initial_hidden_state(
+                        agent.num_envs
+                    )
+                else:
+                    cached_initial_hidden_state = None
 
             # Initialize last_episode_starts
             if reset_on_collect or last_done is None:
@@ -723,9 +736,8 @@ def _collect_rollouts(
                     finished_mask = torch.as_tensor(
                         done, dtype=torch.bool, device=agent.device
                     )
-                    initial_hidden_states_for_reset = agent.get_initial_hidden_state(
-                        agent.num_envs
-                    )
+                    # Use cached initial state instead of re-allocating every time
+                    initial_hidden_states_for_reset = cached_initial_hidden_state
                     if isinstance(agent.hidden_state, dict):
                         for key in agent.hidden_state:
                             reset_states_for_key = initial_hidden_states_for_reset[key][
