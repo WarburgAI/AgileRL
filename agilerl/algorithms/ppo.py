@@ -1526,7 +1526,25 @@ class PPO(RLAlgorithm):
                         last_infos = info  # Store the single info dict
 
                     step += 1
-                    scores += np.array(reward)
+                    # Apply same reward normalization as training for fair comparison
+                    # but WITHOUT updating running stats (to avoid polluting training statistics)
+                    reward_arr = np.array(reward, dtype=np.float32)
+                    if (
+                        hasattr(self, "normalize_rewards")
+                        and self.normalize_rewards
+                        and hasattr(self, "reward_rms")
+                    ):
+                        flat = reward_arr.reshape(-1)
+                        std = math.sqrt(self.reward_rms.var.item() + 1e-8)
+                        mean = self.reward_rms.mean.item()
+                        if std > 0.0:
+                            normalized_flat = (flat - mean) / std
+                        else:
+                            normalized_flat = flat - mean
+                        reward_arr = normalized_flat.reshape(reward_arr.shape).astype(
+                            np.float32
+                        )
+                    scores += reward_arr
 
                     # Check for episode termination
                     newly_finished = (
