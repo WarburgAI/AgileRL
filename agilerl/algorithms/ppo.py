@@ -646,9 +646,7 @@ class PPO(RLAlgorithm):
             try:
                 with torch.no_grad():
                     # obs is already preprocessed above, reuse it directly
-                    latent = self.actor.extract_features(
-                        obs, hidden_state=hidden_state
-                    )
+                    latent = self.actor.extract_features(obs, hidden_state=hidden_state)
                     entropy = self.actor.head_net.entropy_from_latent(
                         latent, action_mask=action_mask
                     )
@@ -1095,7 +1093,9 @@ class PPO(RLAlgorithm):
                 should_stop = False
                 if self.target_kl is not None and num_minibatches_this_epoch % 4 == 0:
                     # Use accumulated KL average instead of single minibatch
-                    avg_approx_kl = (sum_approx_kl / max(1, num_minibatches_this_epoch)).item()
+                    avg_approx_kl = (
+                        sum_approx_kl / max(1, num_minibatches_this_epoch)
+                    ).item()
                     should_stop = avg_approx_kl > self.target_kl
                     if should_stop:
                         warnings.warn(
@@ -1108,17 +1108,23 @@ class PPO(RLAlgorithm):
             denom = max(1, num_minibatches_this_epoch)
             inv = 1.0 / denom
             # Stack all metrics into a single tensor for one CPU transfer
-            metrics_tensor = torch.stack([
-                sum_total_loss * inv,
-                sum_policy_loss * inv,
-                sum_value_loss * inv,
-                sum_entropy_loss * inv,
-                sum_approx_kl * inv,
-                sum_clip_fraction * inv,
-                sum_ev * inv,
-                sum_actor_norm * inv,
-                sum_critic_norm * inv,
-            ]).detach().cpu()
+            metrics_tensor = (
+                torch.stack(
+                    [
+                        sum_total_loss * inv,
+                        sum_policy_loss * inv,
+                        sum_value_loss * inv,
+                        sum_entropy_loss * inv,
+                        sum_approx_kl * inv,
+                        sum_clip_fraction * inv,
+                        sum_ev * inv,
+                        sum_actor_norm * inv,
+                        sum_critic_norm * inv,
+                    ]
+                )
+                .detach()
+                .cpu()
+            )
 
             self.learn_metrics.add("total_loss", float(metrics_tensor[0]))
             self.learn_metrics.add("policy_loss", float(metrics_tensor[1]))
@@ -1236,22 +1242,20 @@ class PPO(RLAlgorithm):
                 # Batch_size: [len(current_coords_minibatch), seq_len]
                 # "initial_hidden_states" is a non-tensor entry in TD: Dict[str, Tensor(batch_seq_size, layers, size)]
                 with self.timing_tracker.time_context("get_sequences_batch_time"):
-                    current_minibatch_td = (
-                        self.rollout_buffer.get_specific_sequences_tensor_batch(
-                            seq_len=seq_len,
-                            sequence_coords=current_coords_minibatch,
-                            device=self.device,  # Fetch directly on GPU to avoid double transfer
-                            include_keys=[
-                                "observations",
-                                "actions",
-                                "log_probs",
-                                "advantages",
-                                "returns",
-                                "values",
-                                "action_masks",
-                            ],
-                            as_plain_dict=True,
-                        )
+                    current_minibatch_td = self.rollout_buffer.get_specific_sequences_tensor_batch(
+                        seq_len=seq_len,
+                        sequence_coords=current_coords_minibatch,
+                        device=self.device,  # Fetch directly on GPU to avoid double transfer
+                        include_keys=[
+                            "observations",
+                            "actions",
+                            "log_probs",
+                            "advantages",
+                            "returns",
+                            "values",
+                            "action_masks",
+                        ],
+                        as_plain_dict=True,
                     )
 
                 if (not isinstance(current_minibatch_td, dict)) or (
@@ -1357,7 +1361,9 @@ class PPO(RLAlgorithm):
                 should_stop = False
                 if self.target_kl is not None and num_minibatches_this_epoch % 4 == 0:
                     # Use accumulated KL average instead of single minibatch
-                    avg_approx_kl = (sum_approx_kl / max(1, num_minibatches_this_epoch)).item()
+                    avg_approx_kl = (
+                        sum_approx_kl / max(1, num_minibatches_this_epoch)
+                    ).item()
                     should_stop = avg_approx_kl > self.target_kl
                     if should_stop:
                         warnings.warn(
@@ -1369,17 +1375,23 @@ class PPO(RLAlgorithm):
             denom = max(1, num_minibatches_this_epoch)
             inv = 1.0 / denom
             # Stack all metrics into a single tensor for one CPU transfer
-            metrics_tensor = torch.stack([
-                sum_total_loss * inv,
-                sum_policy_loss * inv,
-                sum_value_loss * inv,
-                sum_entropy_loss * inv,
-                sum_approx_kl * inv,
-                sum_clip_fraction * inv,
-                sum_ev * inv,
-                sum_actor_norm * inv,
-                sum_critic_norm * inv,
-            ]).detach().cpu()
+            metrics_tensor = (
+                torch.stack(
+                    [
+                        sum_total_loss * inv,
+                        sum_policy_loss * inv,
+                        sum_value_loss * inv,
+                        sum_entropy_loss * inv,
+                        sum_approx_kl * inv,
+                        sum_clip_fraction * inv,
+                        sum_ev * inv,
+                        sum_actor_norm * inv,
+                        sum_critic_norm * inv,
+                    ]
+                )
+                .detach()
+                .cpu()
+            )
 
             self.learn_metrics.add("total_loss", float(metrics_tensor[0]))
             self.learn_metrics.add("policy_loss", float(metrics_tensor[1]))
@@ -1569,6 +1581,9 @@ class PPO(RLAlgorithm):
                             newly_finished
                         ]
                         finished[newly_finished] = True
+                        scores[newly_finished] = (
+                            0  # Reset to prevent cross-episode contamination
+                        )
 
                 # End of episode loop for one test run
                 loop_reward_sum = np.sum(completed_episode_scores)
@@ -1590,7 +1605,12 @@ class PPO(RLAlgorithm):
                         final_info_for_callback = last_infos
 
                 if callback is not None:
-                    callback(loop_reward_sum, final_info_for_callback)
+                    # Pass episode scores for detailed logging
+                    callback(
+                        loop_reward_sum,
+                        final_info_for_callback,
+                        completed_episode_scores.copy(),
+                    )
 
                 rewards.append(np.mean(completed_episode_scores))
 
