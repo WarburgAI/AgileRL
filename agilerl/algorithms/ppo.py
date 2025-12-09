@@ -645,8 +645,9 @@ class PPO(RLAlgorithm):
             # Try to compute entropy from the actor's head
             try:
                 with torch.no_grad():
+                    # obs is already preprocessed above, reuse it directly
                     latent = self.actor.extract_features(
-                        self.preprocess_observation(obs), hidden_state=hidden_state
+                        obs, hidden_state=hidden_state
                     )
                     entropy = self.actor.head_net.entropy_from_latent(
                         latent, action_mask=action_mask
@@ -1077,11 +1078,6 @@ class PPO(RLAlgorithm):
 
                 num_minibatches_this_epoch += 1
 
-                # Check KL divergence for early stopping using current minibatch value
-                current_approx_kl = float(loss_dict["approx_kl"].detach().cpu())
-                should_stop = (
-                    self.target_kl is not None and current_approx_kl > self.target_kl
-                )
                 # Clean up minibatch tensors to free memory
                 del (
                     mb_obs,
@@ -1095,42 +1091,44 @@ class PPO(RLAlgorithm):
                     del eval_hidden_state
                 del loss_dict, loss
 
-                if should_stop:
-                    warnings.warn(
-                        f"Flat learning: KL divergence {current_approx_kl:.4f} exceeded target {self.target_kl}. Stopping update for this epoch."
-                    )
-                    break  # Break from minibatch loop for this epoch
+                # Check KL divergence for early stopping - only check every 4 minibatches to reduce GPU sync overhead
+                should_stop = False
+                if self.target_kl is not None and num_minibatches_this_epoch % 4 == 0:
+                    # Use accumulated KL average instead of single minibatch
+                    avg_approx_kl = (sum_approx_kl / max(1, num_minibatches_this_epoch)).item()
+                    should_stop = avg_approx_kl > self.target_kl
+                    if should_stop:
+                        warnings.warn(
+                            f"Flat learning: KL divergence {avg_approx_kl:.4f} exceeded target {self.target_kl}. Stopping update for this epoch."
+                        )
+                        break  # Break from minibatch loop for this epoch
 
             # After all minibatches for this epoch, log averaged metrics once
+            # Batch all GPU->CPU transfers into one call to reduce sync overhead
             denom = max(1, num_minibatches_this_epoch)
             inv = 1.0 / denom
-            self.learn_metrics.add(
-                "total_loss", float((sum_total_loss * inv).detach().cpu())
-            )
-            self.learn_metrics.add(
-                "policy_loss", float((sum_policy_loss * inv).detach().cpu())
-            )
-            self.learn_metrics.add(
-                "value_loss", float((sum_value_loss * inv).detach().cpu())
-            )
-            self.learn_metrics.add(
-                "entropy_loss", float((sum_entropy_loss * inv).detach().cpu())
-            )
-            self.learn_metrics.add(
-                "approx_kl", float((sum_approx_kl * inv).detach().cpu())
-            )
-            self.learn_metrics.add(
-                "clip_fraction", float((sum_clip_fraction * inv).detach().cpu())
-            )
-            self.learn_metrics.add(
-                "explained_variance", float((sum_ev * inv).detach().cpu())
-            )
-            self.learn_metrics.add(
-                "actor_grad_norm", float((sum_actor_norm * inv).detach().cpu())
-            )
-            self.learn_metrics.add(
-                "critic_grad_norm", float((sum_critic_norm * inv).detach().cpu())
-            )
+            # Stack all metrics into a single tensor for one CPU transfer
+            metrics_tensor = torch.stack([
+                sum_total_loss * inv,
+                sum_policy_loss * inv,
+                sum_value_loss * inv,
+                sum_entropy_loss * inv,
+                sum_approx_kl * inv,
+                sum_clip_fraction * inv,
+                sum_ev * inv,
+                sum_actor_norm * inv,
+                sum_critic_norm * inv,
+            ]).detach().cpu()
+
+            self.learn_metrics.add("total_loss", float(metrics_tensor[0]))
+            self.learn_metrics.add("policy_loss", float(metrics_tensor[1]))
+            self.learn_metrics.add("value_loss", float(metrics_tensor[2]))
+            self.learn_metrics.add("entropy_loss", float(metrics_tensor[3]))
+            self.learn_metrics.add("approx_kl", float(metrics_tensor[4]))
+            self.learn_metrics.add("clip_fraction", float(metrics_tensor[5]))
+            self.learn_metrics.add("explained_variance", float(metrics_tensor[6]))
+            self.learn_metrics.add("actor_grad_norm", float(metrics_tensor[7]))
+            self.learn_metrics.add("critic_grad_norm", float(metrics_tensor[8]))
 
         # Free large references after training step
         del buffer_td
@@ -1242,7 +1240,7 @@ class PPO(RLAlgorithm):
                         self.rollout_buffer.get_specific_sequences_tensor_batch(
                             seq_len=seq_len,
                             sequence_coords=current_coords_minibatch,
-                            device="cpu",
+                            device=self.device,  # Fetch directly on GPU to avoid double transfer
                             include_keys=[
                                 "observations",
                                 "actions",
@@ -1262,23 +1260,14 @@ class PPO(RLAlgorithm):
                     warnings.warn("Skipping empty or invalid minibatch of sequences.")
                     continue
 
-                # Extract tensors on CPU and move only this minibatch's tensors to target device
-                obs_seq_cpu = current_minibatch_td["observations"]
-                if isinstance(obs_seq_cpu, dict):
-                    mb_obs_seq = {k: v.to(self.device) for k, v in obs_seq_cpu.items()}
-                else:
-                    mb_obs_seq = obs_seq_cpu.to(self.device)
-
-                mb_actions_seq = current_minibatch_td["actions"].to(self.device)
-                mb_old_log_probs_seq = current_minibatch_td["log_probs"].to(self.device)
-                mb_advantages_seq = current_minibatch_td["advantages"].to(self.device)
-                mb_returns_seq = current_minibatch_td["returns"].to(self.device)
-                mb_old_values_seq = current_minibatch_td["values"].to(self.device)
-                mb_action_masks_seq = (
-                    current_minibatch_td.get("action_masks").to(self.device)
-                    if "action_masks" in current_minibatch_td
-                    else None
-                )
+                # Data is already on device from get_specific_sequences_tensor_batch
+                mb_obs_seq = current_minibatch_td["observations"]
+                mb_actions_seq = current_minibatch_td["actions"]
+                mb_old_log_probs_seq = current_minibatch_td["log_probs"]
+                mb_advantages_seq = current_minibatch_td["advantages"]
+                mb_returns_seq = current_minibatch_td["returns"]
+                mb_old_values_seq = current_minibatch_td["values"]
+                mb_action_masks_seq = current_minibatch_td.get("action_masks", None)
 
                 mb_initial_hidden_states_dict = current_minibatch_td.get(
                     "initial_hidden_states", None
@@ -1295,7 +1284,8 @@ class PPO(RLAlgorithm):
                     current_step_hidden_state_actor = {
                         # val is (batch_seq_size, layers, size), permute to (layers, batch_seq_size, size)
                         # Detach to prevent old computation graphs from accumulating
-                        key: val.permute(1, 0, 2).contiguous().detach().to(self.device)
+                        # Data is already on device from get_specific_sequences_tensor_batch
+                        key: val.permute(1, 0, 2).contiguous().detach()
                         for key, val in mb_initial_hidden_states_dict.items()
                     }
 
@@ -1354,12 +1344,6 @@ class PPO(RLAlgorithm):
 
                 num_minibatches_this_epoch += 1
 
-                # Check KL divergence for early stopping using current minibatch value
-                current_approx_kl = float(loss_dict["approx_kl"].detach().cpu())
-                should_stop = (
-                    self.target_kl is not None and current_approx_kl > self.target_kl
-                )
-
                 # Clean up BPTT minibatch tensors to free memory
                 del mb_obs_seq, mb_actions_seq, mb_old_log_probs_seq
                 del mb_advantages_seq, mb_returns_seq, mb_old_values_seq
@@ -1368,42 +1352,44 @@ class PPO(RLAlgorithm):
 
                 del loss_dict, loss
 
-                if should_stop:
-                    warnings.warn(
-                        f"Minibatch: KL divergence {current_approx_kl:.4f} exceeded target {self.target_kl}. Stopping update for this epoch."
-                    )
-                    break  # Break from minibatch loop for this epoch
+                # Check KL divergence for early stopping - only check every 4 minibatches to reduce GPU sync overhead
+                # This is a performance optimization that slightly delays early stopping detection
+                should_stop = False
+                if self.target_kl is not None and num_minibatches_this_epoch % 4 == 0:
+                    # Use accumulated KL average instead of single minibatch
+                    avg_approx_kl = (sum_approx_kl / max(1, num_minibatches_this_epoch)).item()
+                    should_stop = avg_approx_kl > self.target_kl
+                    if should_stop:
+                        warnings.warn(
+                            f"Minibatch: KL divergence {avg_approx_kl:.4f} exceeded target {self.target_kl}. Stopping update for this epoch."
+                        )
+                        break  # Break from minibatch loop for this epoch
 
-            # Log averaged metrics once per epoch
+            # Log averaged metrics once per epoch - batch all GPU->CPU transfers into one call
             denom = max(1, num_minibatches_this_epoch)
             inv = 1.0 / denom
-            self.learn_metrics.add(
-                "total_loss", float((sum_total_loss * inv).detach().cpu())
-            )
-            self.learn_metrics.add(
-                "policy_loss", float((sum_policy_loss * inv).detach().cpu())
-            )
-            self.learn_metrics.add(
-                "value_loss", float((sum_value_loss * inv).detach().cpu())
-            )
-            self.learn_metrics.add(
-                "entropy_loss", float((sum_entropy_loss * inv).detach().cpu())
-            )
-            self.learn_metrics.add(
-                "approx_kl", float((sum_approx_kl * inv).detach().cpu())
-            )
-            self.learn_metrics.add(
-                "clip_fraction", float((sum_clip_fraction * inv).detach().cpu())
-            )
-            self.learn_metrics.add(
-                "explained_variance", float((sum_ev * inv).detach().cpu())
-            )
-            self.learn_metrics.add(
-                "actor_grad_norm", float((sum_actor_norm * inv).detach().cpu())
-            )
-            self.learn_metrics.add(
-                "critic_grad_norm", float((sum_critic_norm * inv).detach().cpu())
-            )
+            # Stack all metrics into a single tensor for one CPU transfer
+            metrics_tensor = torch.stack([
+                sum_total_loss * inv,
+                sum_policy_loss * inv,
+                sum_value_loss * inv,
+                sum_entropy_loss * inv,
+                sum_approx_kl * inv,
+                sum_clip_fraction * inv,
+                sum_ev * inv,
+                sum_actor_norm * inv,
+                sum_critic_norm * inv,
+            ]).detach().cpu()
+
+            self.learn_metrics.add("total_loss", float(metrics_tensor[0]))
+            self.learn_metrics.add("policy_loss", float(metrics_tensor[1]))
+            self.learn_metrics.add("value_loss", float(metrics_tensor[2]))
+            self.learn_metrics.add("entropy_loss", float(metrics_tensor[3]))
+            self.learn_metrics.add("approx_kl", float(metrics_tensor[4]))
+            self.learn_metrics.add("clip_fraction", float(metrics_tensor[5]))
+            self.learn_metrics.add("explained_variance", float(metrics_tensor[6]))
+            self.learn_metrics.add("actor_grad_norm", float(metrics_tensor[7]))
+            self.learn_metrics.add("critic_grad_norm", float(metrics_tensor[8]))
 
     def add_collection_time(self, collection_time: float) -> None:
         """Add collection time to metrics tracker.

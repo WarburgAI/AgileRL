@@ -408,7 +408,8 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                     shape = tuple(
                         batch_size if x == BatchDimension else x for x in shape
                     )
-                    self.cached_hidden_state[name] = torch.zeros(shape).to(device)
+                    # Create tensor directly on target device to avoid CPU->GPU transfer
+                    self.cached_hidden_state[name] = torch.zeros(shape, device=device)
             return deepcopy(self.cached_hidden_state)
         else:
             raise ValueError(
