@@ -93,10 +93,7 @@ class RolloutHook(ABC):
         add_method = buffer_data.get("_buffer_add_method")
 
         # Use ultrafast path if available (cached tensor refs, no TensorDict overhead)
-        if (
-            hasattr(agent.rollout_buffer, "add_ultrafast")
-            and buffer_data["hidden_state"] is None
-        ):
+        if hasattr(agent.rollout_buffer, "add_ultrafast"):
             # Optimize data preparation using np.array with copy=False and ndmin=1
             # This replaces multiple isinstance/asarray/astype/atleast_1d calls with single C-level calls
 
@@ -123,6 +120,12 @@ class RolloutHook(ABC):
             if timeouts is not None:
                 timeouts = np.array(timeouts, dtype=bool, copy=False, ndmin=1)
 
+            bootstrap_value = buffer_data.get("bootstrap_value")
+            if bootstrap_value is not None:
+                bootstrap_value = np.array(
+                    bootstrap_value, dtype=np.float32, copy=False, ndmin=1
+                )
+
             action_mask = buffer_data.get("action_mask")
             if action_mask is not None:
                 # action mask usually needs to be kept as is, but ensure bool if provided
@@ -141,6 +144,8 @@ class RolloutHook(ABC):
                 episode_start=episode_start,
                 action_mask=action_mask,
                 timeouts=timeouts,
+                hidden_state=buffer_data["hidden_state"],
+                bootstrap_value=bootstrap_value,
             )
         elif hasattr(agent.rollout_buffer, "add_fast"):
             # Fast path - bypasses some TensorDict overhead
@@ -197,6 +202,7 @@ class RolloutHook(ABC):
                 episode_start=episode_start_np,
                 action_mask=buffer_data.get("action_mask", None),
                 timeouts=timeouts_np,
+                bootstrap_value=buffer_data.get("bootstrap_value"),
             )
 
     def on_episode_end(
@@ -700,6 +706,77 @@ def _collect_rollouts(
                 # Add next_info to step_data for hooks that need it (e.g., WPPO)
                 step_data["next_info"] = next_info
 
+                # Calculate bootstrap value for timeouts
+                bootstrap_value = None
+                if np.any(timeout_flags):
+                    # We need to compute the value of the terminal state V(s_trunc, h_trunc)
+                    # For vector envs, info is a dict of arrays or list of dicts.
+                    # We need 'final_observation' from it.
+                    final_obs = next_obs  # Default fallback (incorrect if reset)
+
+                    # Try to extract final observations for timeout envs
+                    final_obs_list = []
+                    # Check if we have final_observation in infos
+                    if isinstance(next_info, dict) and "final_observation" in next_info:
+                        # Vectorized dict info (e.g. Gymnasium VectorEnv)
+                        # final_observation is usually an array of shape (num_envs, obs_shape)
+                        # or a list where only done envs have valid data.
+                        # Gymnasium's SyncVectorEnv puts the *reset* obs in next_obs,
+                        # and the *terminal* obs in "final_observation".
+                        f_obs = next_info["final_observation"]
+                        if len(f_obs) == agent.num_envs:
+                            final_obs = f_obs
+                    elif isinstance(next_info, list):
+                        # List of dicts
+                        # Construct a batch of final observations
+                        # For envs that are NOT timeouts, we don't strictly need this value,
+                        # but we need a batch for the critic. Use next_obs as placeholder.
+                        final_obs = next_obs.copy()
+                        for i, inf in enumerate(next_info):
+                            if timeout_flags[i] and "final_observation" in inf:
+                                final_obs[i] = inf["final_observation"]
+
+                    with torch.no_grad():
+                        # Use the hidden state that resulted from the action (before reset logic might clear it)
+                        # In this loop, agent.hidden_state contains the state AFTER the step.
+                        # However, for auto-resetting envs, if done=True, the hidden state might need handling.
+                        # But here we want the hidden state *at the end of the episode*.
+                        # agent.hidden_state currently holds h_{t+1}.
+                        # If the environment auto-resets, h_{t+1} corresponds to the *next* step (reset).
+                        # BUT PPO agent.get_action updated agent.hidden_state to be the output of the RNN
+                        # processing obs_t. This IS the hidden state at t+1 (terminal).
+                        # So using agent.hidden_state is correct for the terminal value.
+
+                        # We only need values for timeouts, but we batch compute for simplicity
+                        # (or masked compute if we want to optimize, but batch is usually faster than loop)
+
+                        val_obs = agent.preprocess_observation(final_obs)
+
+                        if recurrent:
+                            # Use current hidden state (which is h_trunc)
+                            # We use the critic to get the value
+                            if agent.share_encoders:
+                                # Need to run actor encoder first to get latent
+                                latent, _ = agent.actor.extract_features(
+                                    val_obs, hidden_state=agent.hidden_state
+                                )
+                                # Critic head
+                                b_values = agent.critic.forward_head(latent)
+                            else:
+                                b_values, _ = agent.critic(
+                                    val_obs, hidden_state=agent.hidden_state
+                                )
+                        else:
+                            if agent.share_encoders:
+                                latent = agent.actor.extract_features(val_obs)
+                                b_values = agent.critic.forward_head(latent)
+                            else:
+                                b_values = agent.critic(val_obs)
+
+                        if isinstance(b_values, tuple):
+                            b_values = b_values[0]
+                        bootstrap_value = b_values.squeeze(-1).cpu().numpy()
+
                 with agent.timing_tracker.time_context("eval_copy"):
                     # Prepare buffer data through primary hook
                     buffer_data = primary_hook.prepare_buffer_data(
@@ -715,6 +792,10 @@ def _collect_rollouts(
                         step_data,
                         timeout=timeout_flags,
                     )
+
+                    # Add bootstrap value to buffer data
+                    if bootstrap_value is not None:
+                        buffer_data["bootstrap_value"] = bootstrap_value
 
                     buffer_data["episode_start"] = last_episode_starts
                     # Add to buffer through primary hook

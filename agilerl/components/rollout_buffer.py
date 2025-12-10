@@ -216,6 +216,9 @@ class RolloutBuffer:
                 "returns": torch.zeros(
                     (self.capacity, self.num_envs), dtype=torch.float32
                 ),
+                "bootstrap_values": torch.zeros(
+                    (self.capacity, self.num_envs), dtype=torch.float32
+                ),
                 "episode_starts": torch.zeros(
                     (self.capacity, self.num_envs), dtype=torch.bool
                 ),
@@ -271,6 +274,7 @@ class RolloutBuffer:
         self._next_obs_tensor = self.buffer["next_observations"]
         self._episode_start_tensor = self.buffer["episode_starts"]
         self._timeout_tensor = self.buffer["timeouts"]
+        self._bootstrap_value_tensor = self.buffer["bootstrap_values"]
         self._has_action_masks = "action_masks" in self.buffer.keys()
         if self._has_action_masks:
             self._action_mask_tensor = self.buffer["action_masks"]
@@ -289,6 +293,8 @@ class RolloutBuffer:
         episode_start: np.ndarray,
         action_mask: Optional[np.ndarray] = None,
         timeouts: Optional[np.ndarray] = None,
+        hidden_state: Optional[Dict[str, torch.Tensor]] = None,
+        bootstrap_value: Optional[np.ndarray] = None,
     ) -> None:
         """Ultra-fast path for adding data - uses cached tensor refs, minimal overhead.
 
@@ -320,10 +326,23 @@ class RolloutBuffer:
                 torch.from_numpy(timeouts), non_blocking=True
             )
 
+        if bootstrap_value is not None:
+            self._bootstrap_value_tensor[pos].copy_(
+                torch.from_numpy(bootstrap_value), non_blocking=True
+            )
+
         if action_mask is not None and self._has_action_masks:
             self._action_mask_tensor[pos].copy_(
                 torch.from_numpy(action_mask), non_blocking=True
             )
+
+        if self.recurrent and hidden_state is not None:
+            # Optimized hidden state copy: directly use tensor.copy_ without intermediate .cpu() call
+            # This relies on PyTorch's cross-device copy capabilities
+            for key, ppo_tensor_val in hidden_state.items():
+                self.buffer["hidden_states"][key][pos].copy_(
+                    ppo_tensor_val.permute(1, 0, 2).detach(), non_blocking=True
+                )
 
         self.pos = pos + 1
         if self.pos == self.capacity:
@@ -345,6 +364,7 @@ class RolloutBuffer:
         episode_start: Optional[Union[bool, np.ndarray]] = None,
         action_mask: Optional[ArrayOrTensor] = None,
         timeouts: Optional[Union[bool, np.ndarray]] = None,
+        bootstrap_value: Optional[Union[float, np.ndarray]] = None,
     ) -> None:
         """
         Add a new batch of observations and associated data from vectorized environments to the buffer.
@@ -434,6 +454,19 @@ class RolloutBuffer:
             timeouts = np.zeros(self.num_envs, dtype=bool)
         timeouts_tensor = torch.as_tensor(timeouts, dtype=torch.bool, device="cpu")
         current_step_data["timeouts"] = timeouts_tensor.reshape(self.num_envs)
+
+        # Bootstrap Values (for timeout correction)
+        if bootstrap_value is not None:
+            bootstrap_value_tensor = torch.as_tensor(
+                bootstrap_value, dtype=torch.float32, device="cpu"
+            )
+            current_step_data["bootstrap_values"] = bootstrap_value_tensor.reshape(
+                self.num_envs
+            )
+        else:
+            current_step_data["bootstrap_values"] = torch.zeros(
+                self.num_envs, dtype=torch.float32, device="cpu"
+            )
 
         # Values
         value_tensor = torch.as_tensor(value, dtype=torch.float32, device="cpu")
@@ -631,6 +664,11 @@ class RolloutBuffer:
             if "timeouts" in self.buffer.keys()
             else np.zeros_like(dones_np)
         )
+        bootstrap_values_np = (
+            self.buffer["bootstrap_values"][:buffer_size].cpu().numpy()
+            if "bootstrap_values" in self.buffer.keys()
+            else np.zeros((buffer_size, self.num_envs), dtype=np.float32)
+        )
         values_np = self.buffer["values"][:buffer_size].cpu().numpy()
 
         # For time-limit bootstrapping: terminals are actual episode ends (not timeouts)
@@ -657,6 +695,10 @@ class RolloutBuffer:
                 else:
                     next_non_terminal = 1.0 - terminals_np[t + 1].astype(float)
                     next_values = values_np[t + 1]
+
+                    # Fix for timeouts: use the specific bootstrap value instead of the reset state value
+                    if timeouts_np[t]:
+                        next_values = bootstrap_values_np[t]
 
                 delta = (
                     rewards_np[t]
