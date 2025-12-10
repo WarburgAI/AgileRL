@@ -26,7 +26,6 @@ from agilerl.utils.algo_utils import (
     share_encoder_parameters,
 )
 from agilerl.utils.metrics import MetricsTracker, TimingTracker
-from agilerl.wrappers.utils import RunningMeanStd
 
 
 class PPO(RLAlgorithm):
@@ -70,8 +69,6 @@ class PPO(RLAlgorithm):
     :type target_kl: float, optional
     :param normalize_images: Flag to normalize images, defaults to True
     :type normalize_images: bool, optional
-    :param normalize_rewards: Flag to normalize scalar rewards using a running mean/std, defaults to True
-    :type normalize_rewards: bool, optional
     :param update_epochs: Number of policy update epochs, defaults to 4
     :type update_epochs: int, optional
     :param actor_network: Custom actor network, defaults to None
@@ -119,7 +116,6 @@ class PPO(RLAlgorithm):
         max_grad_norm: float = 0.5,
         target_kl: Optional[float] = None,
         normalize_images: bool = True,
-        normalize_rewards: bool = False,
         update_epochs: int = 4,
         actor_network: Optional[EvolvableModule] = None,
         critic_network: Optional[EvolvableModule] = None,
@@ -146,9 +142,6 @@ class PPO(RLAlgorithm):
             torch_compiler=torch_compiler,
             name="PPO",
         )
-
-        self.normalize_rewards = normalize_rewards
-        self.reward_rms = RunningMeanStd(epsilon=1e-4, device="cpu")
 
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(learn_step, int), "Learn step must be an integer."
@@ -372,28 +365,6 @@ class PPO(RLAlgorithm):
         self.total_collection_time = 0.0
         self.last_learn_time = 0.0
         self.last_collection_time = 0.0
-
-    def normalize_reward(self, reward: ArrayOrTensor) -> np.ndarray:
-        """Normalize extrinsic rewards using a running mean and variance."""
-        if not self.normalize_rewards:
-            return np.asarray(reward, dtype=np.float32)
-
-        reward_np = np.asarray(reward, dtype=np.float32)
-        if reward_np.size == 0:
-            return reward_np
-
-        flat = reward_np.reshape(-1)
-        reward_tensor = torch.from_numpy(flat).to(self.reward_rms.mean.device)
-        self.reward_rms.update(reward_tensor)
-        std = math.sqrt(self.reward_rms.var.item() + 1e-8)
-        mean = self.reward_rms.mean.item()
-
-        if std <= 0.0:
-            normalized_flat = flat - mean
-        else:
-            normalized_flat = (flat - mean) / std
-
-        return normalized_flat.reshape(reward_np.shape).astype(np.float32)
 
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critic."""
@@ -1078,9 +1049,12 @@ class PPO(RLAlgorithm):
 
                 # Check KL divergence for early stopping using current minibatch value
                 current_approx_kl = float(loss_dict["approx_kl"].detach().cpu())
-                should_stop = (
-                    self.target_kl is not None and current_approx_kl > self.target_kl
-                )
+                should_stop = False
+                if self.target_kl is not None and current_approx_kl > self.target_kl:
+                    warnings.warn(
+                        f"Flat learning: minibatch KL {current_approx_kl:.4f} exceeded target {self.target_kl}. Stopping update for this epoch."
+                    )
+                    should_stop = True
                 # Clean up minibatch tensors to free memory
                 del (
                     mb_obs,
@@ -1095,18 +1069,22 @@ class PPO(RLAlgorithm):
                 del loss_dict, loss
 
                 # Check KL divergence for early stopping - only check every 4 minibatches to reduce GPU sync overhead
-                should_stop = False
-                if self.target_kl is not None and num_minibatches_this_epoch % 4 == 0:
+                if (
+                    not should_stop
+                    and self.target_kl is not None
+                    and num_minibatches_this_epoch % 4 == 0
+                ):
                     # Use accumulated KL average instead of single minibatch
                     avg_approx_kl = (
                         sum_approx_kl / max(1, num_minibatches_this_epoch)
                     ).item()
-                    should_stop = avg_approx_kl > self.target_kl
-                    if should_stop:
+                    if avg_approx_kl > self.target_kl:
                         warnings.warn(
                             f"Flat learning: KL divergence {avg_approx_kl:.4f} exceeded target {self.target_kl}. Stopping update for this epoch."
                         )
-                        break  # Break from minibatch loop for this epoch
+                        should_stop = True
+                if should_stop:
+                    break  # Break from minibatch loop for this epoch
 
             # After all minibatches for this epoch, log averaged metrics once
             denom = max(1, num_minibatches_this_epoch)
@@ -1129,6 +1107,27 @@ class PPO(RLAlgorithm):
                 .detach()
                 .cpu()
             )
+
+            (
+                avg_total_loss,
+                avg_policy_loss,
+                avg_value_loss,
+                avg_entropy_loss,
+                avg_approx_kl,
+                avg_clip_fraction,
+                avg_ev,
+                avg_actor_norm,
+                avg_critic_norm,
+            ) = metrics_tensor.tolist()
+            self.learn_metrics.add("total_loss", float(avg_total_loss))
+            self.learn_metrics.add("policy_loss", float(avg_policy_loss))
+            self.learn_metrics.add("value_loss", float(avg_value_loss))
+            self.learn_metrics.add("entropy_loss", float(avg_entropy_loss))
+            self.learn_metrics.add("approx_kl", float(avg_approx_kl))
+            self.learn_metrics.add("clip_fraction", float(avg_clip_fraction))
+            self.learn_metrics.add("explained_variance", float(avg_ev))
+            self.learn_metrics.add("actor_grad_norm", float(avg_actor_norm))
+            self.learn_metrics.add("critic_grad_norm", float(avg_critic_norm))
 
         # Free large references after training step
         del buffer_td
@@ -1352,9 +1351,12 @@ class PPO(RLAlgorithm):
 
                 # Check KL divergence for early stopping using current minibatch value
                 current_approx_kl = float(loss_dict["approx_kl"].detach().cpu())
-                should_stop = (
-                    self.target_kl is not None and current_approx_kl > self.target_kl
-                )
+                should_stop = False
+                if self.target_kl is not None and current_approx_kl > self.target_kl:
+                    warnings.warn(
+                        f"BPTT learning: minibatch KL {current_approx_kl:.4f} exceeded target {self.target_kl}. Stopping update for this epoch."
+                    )
+                    should_stop = True
 
                 # Clean up BPTT minibatch tensors to free memory
                 del mb_obs_seq, mb_actions_seq, mb_old_log_probs_seq
@@ -1366,18 +1368,22 @@ class PPO(RLAlgorithm):
 
                 # Check KL divergence for early stopping - only check every 4 minibatches to reduce GPU sync overhead
                 # This is a performance optimization that slightly delays early stopping detection
-                should_stop = False
-                if self.target_kl is not None and num_minibatches_this_epoch % 4 == 0:
+                if (
+                    not should_stop
+                    and self.target_kl is not None
+                    and num_minibatches_this_epoch % 4 == 0
+                ):
                     # Use accumulated KL average instead of single minibatch
                     avg_approx_kl = (
                         sum_approx_kl / max(1, num_minibatches_this_epoch)
                     ).item()
-                    should_stop = avg_approx_kl > self.target_kl
-                    if should_stop:
+                    if avg_approx_kl > self.target_kl:
                         warnings.warn(
                             f"Minibatch: KL divergence {avg_approx_kl:.4f} exceeded target {self.target_kl}. Stopping update for this epoch."
                         )
-                        break  # Break from minibatch loop for this epoch
+                        should_stop = True
+                if should_stop:
+                    break  # Break from minibatch loop for this epoch
 
             # Log averaged metrics once per epoch
             denom = max(1, num_minibatches_this_epoch)
@@ -1529,24 +1535,7 @@ class PPO(RLAlgorithm):
                         last_infos = info  # Store the single info dict
 
                     step += 1
-                    # Apply same reward normalization as training for fair comparison
-                    # but WITHOUT updating running stats (to avoid polluting training statistics)
                     reward_arr = np.array(reward, dtype=np.float32)
-                    if (
-                        hasattr(self, "normalize_rewards")
-                        and self.normalize_rewards
-                        and hasattr(self, "reward_rms")
-                    ):
-                        flat = reward_arr.reshape(-1)
-                        std = math.sqrt(self.reward_rms.var.item() + 1e-8)
-                        mean = self.reward_rms.mean.item()
-                        if std > 0.0:
-                            normalized_flat = (flat - mean) / std
-                        else:
-                            normalized_flat = flat - mean
-                        reward_arr = normalized_flat.reshape(reward_arr.shape).astype(
-                            np.float32
-                        )
                     scores += reward_arr
 
                     # Check for episode termination
