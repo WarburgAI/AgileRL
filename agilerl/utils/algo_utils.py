@@ -503,23 +503,18 @@ def obs_to_tensor(
     if isinstance(obs, TensorDict):
         return obs if obs.device == device else obs.to(device)
     elif isinstance(obs, torch.Tensor):
-        # Avoid redundant conversion if already float32 on correct device
-        target_device = torch.device(device) if isinstance(device, str) else device
-        if obs.dtype == torch.float32 and obs.device == target_device:
-            return obs
-        return obs.to(device=device, dtype=torch.float32)
+        return obs.float().to(device)
     elif isinstance(obs, np.ndarray):
-        # Specify dtype directly to avoid intermediate tensor creation
-        return torch.as_tensor(obs, device=device, dtype=torch.float32)
+        return torch.as_tensor(obs, device=device).float()
     elif isinstance(obs, dict):
         return {
-            key: torch.as_tensor(_obs, device=device, dtype=torch.float32)
+            key: torch.as_tensor(_obs, device=device).float()
             for (key, _obs) in obs.items()
         }
     elif isinstance(obs, tuple):
-        return tuple(torch.as_tensor(_obs, device=device, dtype=torch.float32) for _obs in obs)
+        return tuple(torch.as_tensor(_obs, device=device).float() for _obs in obs)
     elif isinstance(obs, (list, Number)):
-        return torch.tensor(obs, device=device, dtype=torch.float32)
+        return torch.tensor(obs, device=device).float()
     else:
         raise Exception(f"Unrecognized type of observation {type(obs)}")
 

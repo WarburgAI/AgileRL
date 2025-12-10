@@ -1076,6 +1076,11 @@ class PPO(RLAlgorithm):
 
                 num_minibatches_this_epoch += 1
 
+                # Check KL divergence for early stopping using current minibatch value
+                current_approx_kl = float(loss_dict["approx_kl"].detach().cpu())
+                should_stop = (
+                    self.target_kl is not None and current_approx_kl > self.target_kl
+                )
                 # Clean up minibatch tensors to free memory
                 del (
                     mb_obs,
@@ -1104,7 +1109,6 @@ class PPO(RLAlgorithm):
                         break  # Break from minibatch loop for this epoch
 
             # After all minibatches for this epoch, log averaged metrics once
-            # Batch all GPU->CPU transfers into one call to reduce sync overhead
             denom = max(1, num_minibatches_this_epoch)
             inv = 1.0 / denom
             # Stack all metrics into a single tensor for one CPU transfer
@@ -1125,16 +1129,6 @@ class PPO(RLAlgorithm):
                 .detach()
                 .cpu()
             )
-
-            self.learn_metrics.add("total_loss", float(metrics_tensor[0]))
-            self.learn_metrics.add("policy_loss", float(metrics_tensor[1]))
-            self.learn_metrics.add("value_loss", float(metrics_tensor[2]))
-            self.learn_metrics.add("entropy_loss", float(metrics_tensor[3]))
-            self.learn_metrics.add("approx_kl", float(metrics_tensor[4]))
-            self.learn_metrics.add("clip_fraction", float(metrics_tensor[5]))
-            self.learn_metrics.add("explained_variance", float(metrics_tensor[6]))
-            self.learn_metrics.add("actor_grad_norm", float(metrics_tensor[7]))
-            self.learn_metrics.add("critic_grad_norm", float(metrics_tensor[8]))
 
         # Free large references after training step
         del buffer_td
@@ -1264,14 +1258,23 @@ class PPO(RLAlgorithm):
                     warnings.warn("Skipping empty or invalid minibatch of sequences.")
                     continue
 
-                # Data is already on device from get_specific_sequences_tensor_batch
-                mb_obs_seq = current_minibatch_td["observations"]
-                mb_actions_seq = current_minibatch_td["actions"]
-                mb_old_log_probs_seq = current_minibatch_td["log_probs"]
-                mb_advantages_seq = current_minibatch_td["advantages"]
-                mb_returns_seq = current_minibatch_td["returns"]
-                mb_old_values_seq = current_minibatch_td["values"]
-                mb_action_masks_seq = current_minibatch_td.get("action_masks", None)
+                # Extract tensors on CPU and move only this minibatch's tensors to target device
+                obs_seq_cpu = current_minibatch_td["observations"]
+                if isinstance(obs_seq_cpu, dict):
+                    mb_obs_seq = {k: v.to(self.device) for k, v in obs_seq_cpu.items()}
+                else:
+                    mb_obs_seq = obs_seq_cpu.to(self.device)
+
+                mb_actions_seq = current_minibatch_td["actions"].to(self.device)
+                mb_old_log_probs_seq = current_minibatch_td["log_probs"].to(self.device)
+                mb_advantages_seq = current_minibatch_td["advantages"].to(self.device)
+                mb_returns_seq = current_minibatch_td["returns"].to(self.device)
+                mb_old_values_seq = current_minibatch_td["values"].to(self.device)
+                mb_action_masks_seq = (
+                    current_minibatch_td.get("action_masks").to(self.device)
+                    if "action_masks" in current_minibatch_td
+                    else None
+                )
 
                 mb_initial_hidden_states_dict = current_minibatch_td.get(
                     "initial_hidden_states", None
@@ -1288,8 +1291,7 @@ class PPO(RLAlgorithm):
                     current_step_hidden_state_actor = {
                         # val is (batch_seq_size, layers, size), permute to (layers, batch_seq_size, size)
                         # Detach to prevent old computation graphs from accumulating
-                        # Data is already on device from get_specific_sequences_tensor_batch
-                        key: val.permute(1, 0, 2).contiguous().detach()
+                        key: val.permute(1, 0, 2).contiguous().detach().to(self.device)
                         for key, val in mb_initial_hidden_states_dict.items()
                     }
 
@@ -1348,6 +1350,12 @@ class PPO(RLAlgorithm):
 
                 num_minibatches_this_epoch += 1
 
+                # Check KL divergence for early stopping using current minibatch value
+                current_approx_kl = float(loss_dict["approx_kl"].detach().cpu())
+                should_stop = (
+                    self.target_kl is not None and current_approx_kl > self.target_kl
+                )
+
                 # Clean up BPTT minibatch tensors to free memory
                 del mb_obs_seq, mb_actions_seq, mb_old_log_probs_seq
                 del mb_advantages_seq, mb_returns_seq, mb_old_values_seq
@@ -1371,7 +1379,7 @@ class PPO(RLAlgorithm):
                         )
                         break  # Break from minibatch loop for this epoch
 
-            # Log averaged metrics once per epoch - batch all GPU->CPU transfers into one call
+            # Log averaged metrics once per epoch
             denom = max(1, num_minibatches_this_epoch)
             inv = 1.0 / denom
             # Stack all metrics into a single tensor for one CPU transfer
@@ -1392,16 +1400,6 @@ class PPO(RLAlgorithm):
                 .detach()
                 .cpu()
             )
-
-            self.learn_metrics.add("total_loss", float(metrics_tensor[0]))
-            self.learn_metrics.add("policy_loss", float(metrics_tensor[1]))
-            self.learn_metrics.add("value_loss", float(metrics_tensor[2]))
-            self.learn_metrics.add("entropy_loss", float(metrics_tensor[3]))
-            self.learn_metrics.add("approx_kl", float(metrics_tensor[4]))
-            self.learn_metrics.add("clip_fraction", float(metrics_tensor[5]))
-            self.learn_metrics.add("explained_variance", float(metrics_tensor[6]))
-            self.learn_metrics.add("actor_grad_norm", float(metrics_tensor[7]))
-            self.learn_metrics.add("critic_grad_norm", float(metrics_tensor[8]))
 
     def add_collection_time(self, collection_time: float) -> None:
         """Add collection time to metrics tracker.

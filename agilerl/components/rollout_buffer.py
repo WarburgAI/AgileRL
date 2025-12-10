@@ -550,42 +550,41 @@ class RolloutBuffer:
         pos = self.pos
 
         # Direct tensor assignment - much faster than TensorDict slice assignment
-        # Use torch.from_numpy for zero-copy when possible, with non_blocking for async transfers
-        self.buffer["observations"][pos].copy_(torch.from_numpy(obs), non_blocking=True)
-        self.buffer["actions"][pos].copy_(torch.from_numpy(action), non_blocking=True)
-        self.buffer["rewards"][pos].copy_(torch.from_numpy(reward.astype(np.float32)), non_blocking=True)
-        self.buffer["dones"][pos].copy_(torch.from_numpy(done.astype(bool)), non_blocking=True)
-        self.buffer["values"][pos].copy_(torch.from_numpy(value.astype(np.float32)), non_blocking=True)
+        # Use torch.from_numpy for zero-copy when possible
+        self.buffer["observations"][pos].copy_(torch.from_numpy(obs))
+        self.buffer["actions"][pos].copy_(torch.from_numpy(action))
+        self.buffer["rewards"][pos].copy_(torch.from_numpy(reward.astype(np.float32)))
+        self.buffer["dones"][pos].copy_(torch.from_numpy(done.astype(bool)))
+        self.buffer["values"][pos].copy_(torch.from_numpy(value.astype(np.float32)))
         self.buffer["log_probs"][pos].copy_(
-            torch.from_numpy(log_prob.astype(np.float32)), non_blocking=True
+            torch.from_numpy(log_prob.astype(np.float32))
         )
 
         if next_obs is not None:
-            self.buffer["next_observations"][pos].copy_(torch.from_numpy(next_obs), non_blocking=True)
+            self.buffer["next_observations"][pos].copy_(torch.from_numpy(next_obs))
 
         if episode_start is not None:
             self.buffer["episode_starts"][pos].copy_(
-                torch.from_numpy(episode_start.astype(bool)), non_blocking=True
+                torch.from_numpy(episode_start.astype(bool))
             )
         else:
             self.buffer["episode_starts"][pos].fill_(False)
 
         if timeouts is not None:
-            self.buffer["timeouts"][pos].copy_(torch.from_numpy(timeouts.astype(bool)), non_blocking=True)
+            self.buffer["timeouts"][pos].copy_(torch.from_numpy(timeouts.astype(bool)))
         else:
             self.buffer["timeouts"][pos].fill_(False)
 
         if action_mask is not None and "action_masks" in self.buffer.keys():
             self.buffer["action_masks"][pos].copy_(
-                torch.from_numpy(action_mask.astype(bool)), non_blocking=True
+                torch.from_numpy(action_mask.astype(bool))
             )
 
         if self.recurrent and hidden_state is not None:
             for key, ppo_tensor_val in hidden_state.items():
                 # ppo_tensor_val shape: (layers, num_envs, size) -> (num_envs, layers, size)
-                # Note: .copy_() handles cross-device transfers automatically, no need for explicit .cpu()
                 self.buffer["hidden_states"][key][pos].copy_(
-                    ppo_tensor_val.permute(1, 0, 2).detach(), non_blocking=True
+                    ppo_tensor_val.permute(1, 0, 2).detach().cpu()
                 )
 
         self.pos += 1
@@ -860,11 +859,10 @@ class RolloutBuffer:
             window_sum = cum_end - cum_start
             valid_mask = window_sum.eq(0)
             # Convert mask to list of (env_idx, time_idx) pairs
-            # Use vectorized conversion to avoid per-element .item() GPU sync
             t_idx, env_idx = torch.nonzero(valid_mask, as_tuple=True)
-            # Move to CPU once and convert to list - avoids N separate .item() calls
-            coords_array = torch.stack([env_idx, t_idx], dim=1).cpu().numpy()
-            valid_coords = [tuple(row) for row in coords_array]
+            valid_coords = [
+                (int(e.item()), int(t.item())) for t, e in zip(t_idx, env_idx)
+            ]
         else:
             # Non-recurrent case: all coordinates are valid
             valid_coords = [

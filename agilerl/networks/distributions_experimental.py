@@ -238,10 +238,8 @@ class TorchDistribution:
 
     def entropy(self) -> torch.Tensor:
         if isinstance(self.action_space, spaces.Discrete):
-            # Use log_softmax for numerical stability and efficiency (one kernel instead of two)
-            log_p = torch.log_softmax(self.logits, dim=-1)
-            p = torch.exp(log_p)
-            return -(p * log_p).sum(-1)
+            p = torch.softmax(self.logits, dim=-1)
+            return -(p * torch.log(p + 1e-8)).sum(-1)
 
         if isinstance(self.action_space, spaces.Box):
             return 0.5 * (1 + math.log(2 * math.pi)) * self.mu.size(
@@ -254,21 +252,18 @@ class TorchDistribution:
             offset = 0
             for size in self.action_space.nvec:
                 logits_i = self.logits[:, offset : offset + size]
-                # Use log_softmax for numerical stability and efficiency
-                log_p_i = torch.log_softmax(logits_i, dim=-1)
-                p_i = torch.exp(log_p_i)
-                ent_i = -(p_i * log_p_i).sum(-1)
+                p_i = torch.softmax(logits_i, dim=-1)
+                ent_i = -(p_i * torch.log(p_i + 1e-8)).sum(-1)
                 entropies.append(ent_i)
                 offset += size
             return torch.stack(entropies, dim=-1).sum(-1)
 
         # -------- MultiBinary --------
         if isinstance(self.action_space, spaces.MultiBinary):
-            # Use log_sigmoid for numerical stability
-            log_p = torch.nn.functional.logsigmoid(self.logits)
-            log_1_minus_p = torch.nn.functional.logsigmoid(-self.logits)
             p = torch.sigmoid(self.logits)
-            return -(p * log_p + (1 - p) * log_1_minus_p).sum(-1)
+            return -(p * torch.log(p + 1e-8) + (1 - p) * torch.log(1 - p + 1e-8)).sum(
+                -1
+            )
 
         raise NotImplementedError
 
@@ -500,17 +495,12 @@ class EvolvableDistribution(EvolvableWrapper):
                             pass
 
                 # Cache mask conversion to avoid repeated torch.as_tensor calls
-                # Use numpy's data pointer and shape for cache key (more reliable than id())
-                if isinstance(action_mask, np.ndarray):
-                    cache_key = (action_mask.ctypes.data, action_mask.shape)
-                else:
-                    cache_key = id(action_mask)
-
-                if cache_key != self._cached_mask_id:
+                mask_id = id(action_mask)
+                if mask_id != self._cached_mask_id:
                     self._cached_mask = torch.as_tensor(
                         action_mask, device=self.device, dtype=torch.bool
                     )
-                    self._cached_mask_id = cache_key
+                    self._cached_mask_id = mask_id
                 mask_tensor = self._cached_mask.view(logits.shape)
 
             # Single vectorized masked_fill - no splits needed
