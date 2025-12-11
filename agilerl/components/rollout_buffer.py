@@ -694,11 +694,10 @@ class RolloutBuffer:
                     next_values = last_value_np.astype(float)
                 else:
                     next_non_terminal = 1.0 - terminals_np[t + 1].astype(float)
-                    next_values = values_np[t + 1]
-
-                    # Fix for timeouts: use the specific bootstrap value instead of the reset state value
-                    if timeouts_np[t]:
-                        next_values = bootstrap_values_np[t]
+                    # If a timestep was a timeout, bootstrap with the stored value for that env
+                    next_values = np.where(
+                        timeouts_np[t], bootstrap_values_np[t], values_np[t + 1]
+                    )
 
                 delta = (
                     rewards_np[t]
